@@ -1,0 +1,173 @@
+"""
+News fetcher: RSS feeds + optional NewsAPI.
+Returns headlines tagged to specific tickers where possible.
+"""
+import re
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import feedparser
+import requests
+
+from config import NEWS_FEEDS, NEWS_API_KEY
+
+log = logging.getLogger(__name__)
+
+POSITIVE_WORDS = {
+    "surge", "soar", "rally", "beat", "upgrade", "bullish", "growth", "profit",
+    "record", "breakout", "strong", "gain", "rise", "outperform", "buy", "boost",
+    "exceed", "expand", "partnership", "deal", "innovation", "revenue", "earnings",
+    "dividend", "buyback", "acquisition", "approved", "launch", "award",
+}
+
+NEGATIVE_WORDS = {
+    "plunge", "crash", "slump", "miss", "downgrade", "bearish", "loss", "decline",
+    "weak", "fall", "underperform", "sell", "cut", "layoff", "recall", "fine",
+    "lawsuit", "fraud", "investigation", "debt", "default", "warning", "risk",
+    "volatile", "concern", "drop", "tumble", "disappointing", "tariff", "ban",
+}
+
+
+def _score_headline(text: str) -> float:
+    """Return sentiment score in [-1, +1] from keyword counting."""
+    words = set(re.findall(r"\b\w+\b", text.lower()))
+    pos = len(words & POSITIVE_WORDS)
+    neg = len(words & NEGATIVE_WORDS)
+    total = pos + neg
+    if total == 0:
+        return 0.0
+    return (pos - neg) / total
+
+
+def _is_recent(published: str, hours: int = 48) -> bool:
+    """Check if a news item is within the last N hours."""
+    try:
+        import email.utils
+        dt = email.utils.parsedate_to_datetime(published)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        return dt > cutoff
+    except Exception:
+        return True  # assume recent if we can't parse
+
+
+def fetch_rss_news(tickers: list[str], max_per_feed: int = 30) -> dict[str, list[dict]]:
+    """
+    Pull headlines from configured RSS feeds and map them to tickers.
+    Returns {ticker: [{"title": ..., "score": ..., "source": ..., "url": ...}]}
+    """
+    # Build name→ticker reverse map for matching
+    ticker_set = set(tickers)
+    all_headlines: list[dict] = []
+
+    for feed_url in NEWS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:max_per_feed]:
+                title   = entry.get("title", "")
+                summary = entry.get("summary", "")
+                link    = entry.get("link", "")
+                pub     = entry.get("published", "")
+
+                if not _is_recent(pub):
+                    continue
+
+                combined = f"{title} {summary}"
+                score = _score_headline(combined)
+
+                # Match tickers mentioned in headline
+                found = []
+                for ticker in ticker_set:
+                    # Match "$AAPL" or "AAPL " style mentions
+                    pattern = rf"\b{re.escape(ticker)}\b"
+                    if re.search(pattern, combined):
+                        found.append(ticker)
+
+                all_headlines.append({
+                    "title":    title,
+                    "summary":  summary[:300],
+                    "score":    score,
+                    "tickers":  found,
+                    "source":   feed.feed.get("title", feed_url),
+                    "url":      link,
+                    "published": pub,
+                })
+        except Exception as exc:
+            log.warning("RSS feed failed (%s): %s", feed_url, exc)
+
+    # Group by ticker
+    result: dict[str, list[dict]] = {t: [] for t in tickers}
+    general_market: list[dict] = []
+
+    for item in all_headlines:
+        if item["tickers"]:
+            for t in item["tickers"]:
+                if t in result:
+                    result[t].append(item)
+        else:
+            general_market.append(item)
+
+    # Attach most relevant general market news to all tickers
+    for t in tickers:
+        result[t].extend(general_market[:5])
+
+    return result
+
+
+def fetch_newsapi(tickers: list[str], api_key: str = NEWS_API_KEY) -> dict[str, list[dict]]:
+    """
+    Pull stock-specific news from NewsAPI (free tier: 100 req/day).
+    Only called when NEWS_API_KEY is set.
+    """
+    if not api_key:
+        return {}
+
+    result: dict[str, list[dict]] = {}
+    base = "https://newsapi.org/v2/everything"
+    from_dt = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+
+    for ticker in tickers[:20]:  # conserve quota
+        try:
+            resp = requests.get(base, params={
+                "q":        f'"{ticker}" stock',
+                "from":     from_dt,
+                "sortBy":   "relevancy",
+                "language": "en",
+                "pageSize": 10,
+                "apiKey":   api_key,
+            }, timeout=10)
+            data = resp.json()
+            articles = data.get("articles", [])
+            result[ticker] = [
+                {
+                    "title":   a.get("title", ""),
+                    "summary": (a.get("description") or "")[:300],
+                    "score":   _score_headline(f"{a.get('title','')} {a.get('description','')}"),
+                    "source":  a.get("source", {}).get("name", ""),
+                    "url":     a.get("url", ""),
+                    "tickers": [ticker],
+                }
+                for a in articles if a.get("title")
+            ]
+        except Exception as exc:
+            log.warning("NewsAPI failed for %s: %s", ticker, exc)
+
+    return result
+
+
+def aggregate_ticker_news(ticker: str, news_map: dict) -> dict:
+    """Summarise news signals for a single ticker."""
+    articles = news_map.get(ticker, [])
+    if not articles:
+        return {"count": 0, "avg_score": 0.0, "headline": "", "snippets": []}
+
+    scores  = [a["score"] for a in articles]
+    avg_score = sum(scores) / len(scores)
+    top     = sorted(articles, key=lambda x: abs(x["score"]), reverse=True)
+
+    return {
+        "count":     len(articles),
+        "avg_score": avg_score,
+        "headline":  top[0]["title"] if top else "",
+        "snippets":  [f"{a['title']} ({a['source']})" for a in top[:5]],
+    }
