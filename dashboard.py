@@ -582,26 +582,41 @@ def build_sector_chart(sector_returns: dict) -> go.Figure:
     return fig
 
 
-# ── Shared stock-detail view (reused by all three tabs) ────────────────────────
+# ── Shared stock-detail view (reused by all four tabs) ────────────────────────
 
-def show_stock_analysis(stock: StockScore):
-    """Render the complete analysis panel for any StockScore."""
+def show_stock_analysis(stock: StockScore, context: str = "main"):
+    """Render the complete analysis panel for any StockScore.
+
+    `context` must be unique per call-site (e.g. "daily", "search", "sector",
+    "watchlist") so that Streamlit can assign distinct element IDs to each
+    plotly_chart even when multiple tabs render simultaneously.
+    """
     # ── Status banner + trade advice (always shown first) ─────────────────────
     show_status_banner(stock)
     if stock.trade_advice:
         show_trade_advice(stock)
     st.divider()
 
+    pfx    = f"{context}_{stock.ticker}"   # unique prefix for chart keys
     d_left, d_right = st.columns([2, 1])
 
     with d_left:
         df_chart = get_price_history(stock.ticker, "6mo")
         if not df_chart.empty:
-            st.plotly_chart(build_price_chart(stock.ticker, df_chart), width='stretch')
-            st.plotly_chart(build_rsi_chart(stock.ticker, df_chart), width='stretch')
+            st.plotly_chart(
+                build_price_chart(stock.ticker, df_chart),
+                use_container_width=True, key=f"price_{pfx}",
+            )
+            st.plotly_chart(
+                build_rsi_chart(stock.ticker, df_chart),
+                use_container_width=True, key=f"rsi_{pfx}",
+            )
 
     with d_right:
-        st.plotly_chart(build_radar(stock), width='stretch')
+        st.plotly_chart(
+            build_radar(stock),
+            use_container_width=True, key=f"radar_{pfx}",
+        )
         st.markdown(f"### {stock.ticker} — {stock.grade}")
         ind = stock.indicators
         m   = st.columns(2)
@@ -750,21 +765,20 @@ def show_daily_tab(tickers, top_n, macro_flags):
     left, right = st.columns([3, 1])
     with left:
         st.subheader("📊 All Stocks by Score (Top 30)")
-        st.plotly_chart(build_score_bar(scores), width='stretch')
+        st.plotly_chart(build_score_bar(scores), use_container_width=True, key="score_bar_daily")
     with right:
         if sector_returns:
             st.subheader("🔄 Sector Rotation (1d)")
-            st.plotly_chart(build_sector_chart(sector_returns), width='stretch')
+            st.plotly_chart(build_sector_chart(sector_returns), use_container_width=True, key="sector_rot_daily")
 
     st.subheader(f"🏆 Top {top_n} Trading Opportunities")
     df_top = make_scores_df(ranked[:top_n], extra_cols=True)
-    # re-add Rank and extra columns present in old code
     styled = (
         df_top.style
         .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
         .map(colour_chg,   subset=["Chg %"])
     )
-    st.dataframe(styled, width='stretch', hide_index=True, height=420)
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
 
     st.divider()
     st.subheader("🔍 Stock Deep Dive")
@@ -774,7 +788,7 @@ def show_daily_tab(tickers, top_n, macro_flags):
     ]
     pick  = st.selectbox("Select a stock for full analysis:", choices, key="daily_pick")
     stock = ranked[choices.index(pick)]
-    show_stock_analysis(stock)
+    show_stock_analysis(stock, context="daily")
 
     st.divider()
     st.caption("⚠️ For informational purposes only. Not financial advice. Always apply your own due diligence.")
@@ -833,7 +847,7 @@ def show_search_tab(macro_flags):
         st.warning("⚠️ Analysis unavailable — insufficient market data for this ticker.")
         return
 
-    show_stock_analysis(stock)
+    show_stock_analysis(stock, context="search")
     st.divider()
     st.caption("⚠️ For informational purposes only. Not financial advice.")
 
@@ -921,7 +935,10 @@ def show_sector_browser(macro_flags):
 
     # ── Score comparison bar chart ────────────────────────────────────────────
     st.subheader(f"📊 {icon} {selected_sector} — Score Comparison")
-    st.plotly_chart(build_score_bar(sector_scores, height=320), width='stretch')
+    st.plotly_chart(
+        build_score_bar(sector_scores, height=320),
+        use_container_width=True, key=f"score_bar_sector_{selected_sector}",
+    )
 
     st.divider()
 
@@ -934,7 +951,7 @@ def show_sector_browser(macro_flags):
         .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
         .map(colour_chg,   subset=["Chg %"])
     )
-    st.dataframe(styled, width='stretch', hide_index=True, height=500)
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
 
     st.divider()
 
@@ -949,7 +966,7 @@ def show_sector_browser(macro_flags):
         choices,
         key=f"sector_pick_{selected_sector}",
     )
-    show_stock_analysis(ranked_sector[choices.index(pick)])
+    show_stock_analysis(ranked_sector[choices.index(pick)], context=f"sector_{selected_sector}")
     st.divider()
     st.caption("⚠️ For informational purposes only. Not financial advice.")
 
@@ -1160,7 +1177,10 @@ def show_watchlist_tab(macro_flags: tuple):
 
     # ── Score comparison chart ─────────────────────────────────────────────────
     st.subheader("📊 Score Comparison")
-    st.plotly_chart(build_score_bar(wl_scores, height=max(240, wl_n * 24)), width='stretch')
+    st.plotly_chart(
+        build_score_bar(wl_scores, height=max(240, wl_n * 24)),
+        use_container_width=True, key="score_bar_watchlist",
+    )
     st.divider()
 
     # ── Detailed table ─────────────────────────────────────────────────────────
@@ -1199,7 +1219,7 @@ def show_watchlist_tab(macro_flags: tuple):
         .map(colour_score, subset=["Score", "Tech", "Fund"])
         .map(colour_chg,   subset=["Chg %"])
     )
-    st.dataframe(styled, width="stretch", hide_index=True,
+    st.dataframe(styled, use_container_width=True, hide_index=True,
                  height=min(600, 60 + len(rows) * 38))
     st.divider()
 
@@ -1219,7 +1239,7 @@ def show_watchlist_tab(macro_flags: tuple):
         pick = st.selectbox("Select a stock for full analysis:", choices, key="wl_pick")
         sym  = pick.split(" — ")[0].strip()
         if sym in score_map:
-            show_stock_analysis(score_map[sym])
+            show_stock_analysis(score_map[sym], context="watchlist")
 
     st.divider()
     st.caption("⚠️ For informational purposes only. Not financial advice.")
