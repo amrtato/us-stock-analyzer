@@ -10,6 +10,8 @@ Launch:
     streamlit run dashboard.py
 """
 import sys
+import json
+import time
 import warnings
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +22,7 @@ from datetime import datetime
 sys.path.insert(0, ".")
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
@@ -28,7 +31,7 @@ from config import (
     ALL_STOCKS, DJIA_STOCKS, NASDAQ_TOP, SP500_TOP,
     SECTOR_MAP, SECTOR_STOCKS,
 )
-from data.fetcher import fetch_price_history, fetch_fundamentals, fetch_batch_quotes
+from data.fetcher import fetch_price_history, fetch_fundamentals, fetch_batch_quotes, prefetch_price_histories
 from data.news_fetcher import fetch_rss_news, aggregate_ticker_news
 from analyzers.technical import analyse_technical
 from analyzers.fundamental import analyse_fundamental
@@ -95,6 +98,115 @@ SECTOR_ICONS = {
     "Real Estate": "🏢",
 }
 
+# ── Animated loading screen ────────────────────────────────────────────────────
+LOADING_MSGS = [
+    "🤖 Teaching AI to read balance sheets so you don't have to...",
+    "📊 Crunching 847 financial ratios (only 846 of them matter)...",
+    "☕ Markets never sleep, but our analysts needed a coffee break...",
+    "🎲 Consulting the Magic 8-Ball... just kidding, it's actual math...",
+    "🦉 Warren Buffett would hold — we're figuring out if you should too...",
+    "📉 Teaching robots why panic-selling is always the wrong move...",
+    "🔮 Crystal ball buffering... please stand by for technicals...",
+    "💰 Computing your future gains... assuming you bought the dip...",
+    "🚀 To the moon? Let's check the RSI and MACD first...",
+    "📰 Reading every financial headline (yes, even the clickbait ones)...",
+    "🧮 P/E ratios, EPS growth, RSI — not alphabet soup, just alpha...",
+    "🎯 Finding optimal entry points unlike your last three trades...",
+    "🐂 Politely asking 100 stocks whether they're bullish or bearish...",
+    "⏰ Patience is a virtue. So is a 3:1 risk-reward ratio...",
+    "🔬 Running 7 indicators because 6 felt overconfident...",
+    "🎰 This is NOT gambling — we have a Sharpe ratio AND spreadsheets!",
+]
+
+FUN_FACTS = [
+    "💡 The NYSE was founded in 1792 under a buttonwood tree in Manhattan.",
+    "💡 Warren Buffett bought his first stock at age 11 for $38.",
+    "💡 The word 'salary' comes from Roman soldiers being paid in salt.",
+    "💡 The world's first stock exchange opened in Amsterdam in 1602.",
+    "💡 Black Monday (Oct 19, 1987) — Dow fell 22.6% in a single session.",
+    "💡 Apple became the first US company to reach a $1 trillion market cap in 2018.",
+    "💡 The S&P 500 has returned ~10% per year on average since 1957.",
+    "💡 The term 'blue chip' comes from poker — blue chips hold the highest value.",
+    "💡 NASDAQ stands for National Association of Securities Dealers Automated Quotations.",
+    "💡 There are ~58,000 publicly traded companies worldwide right now.",
+]
+
+_LOADING_TEMPLATE = """\
+<!DOCTYPE html><html><head>
+<style>
+body{margin:0;background:#0e1117;color:#fafafa;font-family:'Segoe UI',Helvetica,sans-serif;overflow:hidden}
+.wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:490px;padding:16px 20px}
+.tape{width:100%;overflow:hidden;background:#13131f;border-radius:6px;padding:7px 0;margin-bottom:22px;border:1px solid #252540}
+.tape-inner{display:inline-block;white-space:nowrap;color:#00aaff;font-size:.82em;font-weight:700;animation:scroll 24s linear infinite}
+@keyframes scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.icon{font-size:3.6em;margin:4px 0;animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.13)}}
+.title{font-size:1.45em;font-weight:700;color:#e8e8e8;margin:8px 0 3px;text-align:center}
+.sub{color:#666;font-size:.84em;margin-bottom:14px;text-align:center;letter-spacing:.3px}
+.pbar-wrap{width:82%;max-width:520px;background:#1a1a2a;border-radius:999px;height:9px;overflow:hidden;margin:10px 0 4px;border:1px solid #2a2a3a}
+.pbar{height:100%;background:linear-gradient(90deg,#005fcc,#00aaff,#00ff88);border-radius:999px;width:2%;animation:grow %%SECS%%s ease-out forwards}
+@keyframes grow{from{width:2%}to{width:93%}}
+.cdown-row{color:#888;font-size:.86em;margin:6px 0 16px}
+.cnum{color:#00aaff;font-weight:700;font-size:1.1em;font-variant-numeric:tabular-nums}
+.joke-box{background:#13182a;border:1px solid #212840;border-radius:10px;padding:13px 22px;margin:6px 0;text-align:center;max-width:580px;min-height:48px;display:flex;align-items:center;justify-content:center}
+.joke{color:#c8c8d8;font-size:.91em;font-style:italic;transition:opacity .4s}
+.fact{color:#444;font-size:.77em;margin-top:11px;max-width:500px;text-align:center;transition:opacity .4s}
+.dots span{animation:blink 1.4s infinite;color:#00aaff}
+.dots span:nth-child(2){animation-delay:.2s}
+.dots span:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
+</style></head><body>
+<div class="wrap">
+  <div class="tape"><div class="tape-inner">%%TAPE%%</div></div>
+  <div class="icon">📊</div>
+  <div class="title">Analysing %%N%% stocks<span class="dots"><span>.</span><span>.</span><span>.</span></span></div>
+  <div class="sub">Technical &nbsp;·&nbsp; Fundamental &nbsp;·&nbsp; Sentiment &nbsp;·&nbsp; Macro</div>
+  <div class="pbar-wrap"><div class="pbar" id="pb"></div></div>
+  <div class="cdown-row">Ready in approximately <span class="cnum" id="cd">%%SECS%%</span> seconds</div>
+  <div class="joke-box"><div class="joke" id="jk">🤔 Warming up the analysis engine...</div></div>
+  <div class="fact" id="ft"></div>
+</div>
+<script>
+var J=%%JOKES%%,F=%%FACTS%%,ji=0,fi=0,s=%%SECS%%;
+document.getElementById('jk').textContent=J[0];
+document.getElementById('ft').textContent=F[0];
+setInterval(function(){s=Math.max(0,s-1);document.getElementById('cd').textContent=s;},1000);
+setInterval(function(){ji=(ji+1)%J.length;var e=document.getElementById('jk');e.style.opacity=0;setTimeout(function(){e.textContent=J[ji];e.style.opacity=1;},400);},4500);
+setTimeout(function(){setInterval(function(){fi=(fi+1)%F.length;var e=document.getElementById('ft');e.style.opacity=0;setTimeout(function(){e.textContent=F[fi];e.style.opacity=1;},400);},7000);},3500);
+</script>
+</body></html>"""
+
+
+def _make_loading_html(n_tickers: int, est_secs: int) -> str:
+    """Return a self-contained animated HTML loading page."""
+    tape_syms = [
+        "AAPL","NVDA","MSFT","GOOGL","AMZN","TSLA","META","NFLX",
+        "AMD","JPM","V","JNJ","WMT","DIS","BKNG","GS","MA",
+        "BAC","COST","AVGO","ORCL","CRM","ADBE","INTC","HON",
+    ]
+    tape_inner = " &nbsp;·&nbsp; ".join(
+        '<span style="color:#00ff88">' + t + '</span>' for t in tape_syms * 2
+    )
+    return (
+        _LOADING_TEMPLATE
+        .replace("%%JOKES%%", json.dumps(LOADING_MSGS))
+        .replace("%%FACTS%%", json.dumps(FUN_FACTS))
+        .replace("%%SECS%%",  str(est_secs))
+        .replace("%%N%%",     str(n_tickers))
+        .replace("%%TAPE%%",  tape_inner)
+    )
+
+
+def _needs_loading(cache_key: str) -> bool:
+    """True when this ticker set hasn't been loaded in the current browser session."""
+    return cache_key not in st.session_state.get("_loaded_keys", set())
+
+
+def _mark_loaded(cache_key: str) -> None:
+    if "_loaded_keys" not in st.session_state:
+        st.session_state["_loaded_keys"] = set()
+    st.session_state["_loaded_keys"].add(cache_key)
+
 
 # ── Cached data fetchers ───────────────────────────────────────────────────────
 
@@ -156,6 +268,11 @@ def run_full_analysis(tickers: tuple, macro_flags: tuple) -> list:
 
     quotes   = get_batch_quotes(tickers)
     news_map = get_news(tickers)
+
+    # ── Batch-prefetch all 6-month price histories in ONE yfinance call ─────────
+    # This turns N serialised HTTP calls inside the ThreadPool into instant cache
+    # hits, cutting price-fetch time from ~10 s (100 tickers) to ~4 s.
+    prefetch_price_histories(list(tickers))
 
     scores = []
     with ThreadPoolExecutor(max_workers=15) as pool:
@@ -557,8 +674,20 @@ def make_scores_df(scores: list, extra_cols: bool = False) -> pd.DataFrame:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def show_daily_tab(tickers, top_n, macro_flags):
-    with st.spinner(f"Analysing {len(tickers)} stocks… (cached after first run)"):
-        scores = run_full_analysis(tuple(tickers), macro_flags)
+    tickers_t  = tuple(tickers)
+    cache_key  = f"daily_{hash(tickers_t)}_{hash(macro_flags)}"
+    n          = len(tickers)
+    est_secs   = max(10, min(32, n // 5 + 10))   # ~10s for 30, ~30s for 100
+
+    if _needs_loading(cache_key):
+        loading_slot = st.empty()
+        with loading_slot:
+            components.html(_make_loading_html(n, est_secs), height=520, scrolling=False)
+        scores = run_full_analysis(tickers_t, macro_flags)
+        loading_slot.empty()
+        _mark_loaded(cache_key)
+    else:
+        scores = run_full_analysis(tickers_t, macro_flags)
 
     if not scores:
         st.error("No data returned. Check your internet connection.")
@@ -715,10 +844,20 @@ def show_sector_browser(macro_flags):
     st.divider()
 
     # ── Run analysis ──────────────────────────────────────────────────────────
-    with st.spinner(
-        f"Analysing {len(sector_tickers)} {selected_sector} stocks… "
-        "(cached — fast after first load)"
-    ):
+    sec_cache_key = f"sector_{hash(sector_tickers)}_{hash(macro_flags)}"
+    sec_n         = len(sector_tickers)
+    sec_est       = max(8, min(18, sec_n // 3 + 6))   # ~13s for 20 stocks
+
+    if _needs_loading(sec_cache_key):
+        sec_slot = st.empty()
+        with sec_slot:
+            components.html(
+                _make_loading_html(sec_n, sec_est), height=520, scrolling=False
+            )
+        sector_scores = run_full_analysis(sector_tickers, macro_flags)
+        sec_slot.empty()
+        _mark_loaded(sec_cache_key)
+    else:
         sector_scores = run_full_analysis(sector_tickers, macro_flags)
 
     if not sector_scores:

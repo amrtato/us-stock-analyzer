@@ -38,6 +38,11 @@ _FUND_CACHE:      dict = {}
 _FUND_CACHE_TIME: dict = {}
 FUND_CACHE_TTL = 4 * 3600
 
+# ── In-memory price-history cache (30-min TTL, matches Streamlit cache) ────────
+_PRICE_CACHE:      dict = {}
+_PRICE_CACHE_TIME: dict = {}
+PRICE_CACHE_TTL = 30 * 60    # 30 minutes
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -89,13 +94,24 @@ def _safe(val, default=None):
 # ── Price history ───────────────────────────────────────────────────────────────
 
 def fetch_price_history(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+    # ── In-memory cache hit (populated by prefetch_price_histories) ─────────────
+    if interval == "1d":
+        now = time.monotonic()
+        if ticker in _PRICE_CACHE and (now - _PRICE_CACHE_TIME.get(ticker, 0)) < PRICE_CACHE_TTL:
+            return _PRICE_CACHE[ticker]
+
     for attempt in range(3):
         try:
             with _YF_SEM:
                 time.sleep(0.1)
                 df = yf.download(ticker, period=period, interval=interval,
                                  auto_adjust=True, progress=False)
-            return _flatten(df) if not df.empty else df
+            result = _flatten(df) if not df.empty else df
+            # Populate price cache so repeated individual calls are instant
+            if interval == "1d" and not result.empty:
+                _PRICE_CACHE[ticker]      = result
+                _PRICE_CACHE_TIME[ticker] = time.monotonic()
+            return result
         except RuntimeError as exc:
             if "dictionary changed size" in str(exc) and attempt < 2:
                 time.sleep(0.5 * (attempt + 1))
@@ -106,6 +122,70 @@ def fetch_price_history(ticker: str, period: str = "6mo", interval: str = "1d") 
             log.error("Price fetch failed for %s: %s", ticker, exc)
             return pd.DataFrame()
     return pd.DataFrame()
+
+
+def prefetch_price_histories(tickers: list, period: str = "6mo") -> int:
+    """Batch-download price history for all tickers in a SINGLE yfinance call.
+
+    Populates _PRICE_CACHE so that subsequent fetch_price_history() calls
+    (running inside ThreadPoolExecutor) become instant cache hits instead of
+    N serialised HTTP calls through _YF_SEM.
+
+    Returns the number of tickers successfully cached.
+    """
+    if not tickers:
+        return 0
+    now = time.monotonic()
+    to_fetch = [
+        t for t in tickers
+        if t not in _PRICE_CACHE
+        or (now - _PRICE_CACHE_TIME.get(t, 0)) >= PRICE_CACHE_TTL
+    ]
+    if not to_fetch:
+        return 0
+
+    for attempt in range(3):
+        try:
+            with _YF_SEM:
+                time.sleep(0.1)
+                if len(to_fetch) == 1:
+                    raw    = yf.download(to_fetch[0], period=period, interval="1d",
+                                         auto_adjust=True, progress=False)
+                    result = _flatten(raw)
+                    if not result.empty:
+                        ts = time.monotonic()
+                        _PRICE_CACHE[to_fetch[0]]      = result
+                        _PRICE_CACHE_TIME[to_fetch[0]] = ts
+                    return 1 if not result.empty else 0
+                else:
+                    raw = yf.download(list(to_fetch), period=period, interval="1d",
+                                      auto_adjust=True, group_by="ticker", progress=False)
+
+            if raw is None or raw.empty:
+                return 0
+            count = 0
+            ts    = time.monotonic()
+            for ticker in list(to_fetch):
+                try:
+                    df = _flatten(raw[ticker].dropna())
+                    if not df.empty:
+                        _PRICE_CACHE[ticker]      = df
+                        _PRICE_CACHE_TIME[ticker] = ts
+                        count += 1
+                except Exception as e:
+                    log.debug("Prefetch parse error %s: %s", ticker, e)
+            return count
+
+        except RuntimeError as exc:
+            if "dictionary changed size" in str(exc) and attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            log.error("prefetch_price_histories failed: %s", exc)
+            return 0
+        except Exception as exc:
+            log.error("prefetch_price_histories failed: %s", exc)
+            return 0
+    return 0
 
 
 def fetch_intraday(ticker: str, interval: str = "5m") -> pd.DataFrame:
