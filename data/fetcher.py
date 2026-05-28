@@ -89,23 +89,43 @@ def _safe(val, default=None):
 # ── Price history ───────────────────────────────────────────────────────────────
 
 def fetch_price_history(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    try:
-        df = yf.download(ticker, period=period, interval=interval,
-                         auto_adjust=True, progress=False)
-        return _flatten(df) if not df.empty else df
-    except Exception as exc:
-        log.error("Price fetch failed for %s: %s", ticker, exc)
-        return pd.DataFrame()
+    for attempt in range(3):
+        try:
+            with _YF_SEM:
+                time.sleep(0.1)
+                df = yf.download(ticker, period=period, interval=interval,
+                                 auto_adjust=True, progress=False)
+            return _flatten(df) if not df.empty else df
+        except RuntimeError as exc:
+            if "dictionary changed size" in str(exc) and attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            log.error("Price fetch failed for %s: %s", ticker, exc)
+            return pd.DataFrame()
+        except Exception as exc:
+            log.error("Price fetch failed for %s: %s", ticker, exc)
+            return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def fetch_intraday(ticker: str, interval: str = "5m") -> pd.DataFrame:
-    try:
-        df = yf.download(ticker, period="5d", interval=interval,
-                         auto_adjust=True, progress=False)
-        return _flatten(df)
-    except Exception as exc:
-        log.error("Intraday fetch failed for %s: %s", ticker, exc)
-        return pd.DataFrame()
+    for attempt in range(3):
+        try:
+            with _YF_SEM:
+                time.sleep(0.1)
+                df = yf.download(ticker, period="5d", interval=interval,
+                                 auto_adjust=True, progress=False)
+            return _flatten(df)
+        except RuntimeError as exc:
+            if "dictionary changed size" in str(exc) and attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            log.error("Intraday fetch failed for %s: %s", ticker, exc)
+            return pd.DataFrame()
+        except Exception as exc:
+            log.error("Intraday fetch failed for %s: %s", ticker, exc)
+            return pd.DataFrame()
+    return pd.DataFrame()
 
 
 # ── Batch quotes ────────────────────────────────────────────────────────────────
@@ -115,31 +135,42 @@ def fetch_batch_quotes(tickers: list) -> dict:
     results = {}
     if not tickers:
         return results
-    try:
-        data = yf.download(tickers, period="2d", interval="1d",
-                           auto_adjust=True, group_by="ticker", progress=False)
-        if data.empty:
+    for attempt in range(3):
+        try:
+            with _YF_SEM:
+                time.sleep(0.1)
+                data = yf.download(list(tickers), period="2d", interval="1d",
+                                   auto_adjust=True, group_by="ticker", progress=False)
+            if data.empty:
+                return results
+            for ticker in list(tickers):  # iterate a copy to avoid mutation issues
+                try:
+                    df = data[ticker].dropna()
+                    if df.empty or len(df) < 2:
+                        continue
+                    today, prev = df.iloc[-1], df.iloc[-2]
+                    chg = (float(today["Close"]) - float(prev["Close"])) / float(prev["Close"]) * 100
+                    results[ticker] = {
+                        "price":      float(today["Close"]),
+                        "open":       float(today["Open"]),
+                        "high":       float(today["High"]),
+                        "low":        float(today["Low"]),
+                        "volume":     float(today["Volume"]),
+                        "change_pct": float(chg),
+                        "prev_close": float(prev["Close"]),
+                    }
+                except Exception as e:
+                    log.debug("Quote parse failed for %s: %s", ticker, e)
             return results
-        for ticker in tickers:
-            try:
-                df = data[ticker].dropna()
-                if df.empty or len(df) < 2:
-                    continue
-                today, prev = df.iloc[-1], df.iloc[-2]
-                chg = (float(today["Close"]) - float(prev["Close"])) / float(prev["Close"]) * 100
-                results[ticker] = {
-                    "price":      float(today["Close"]),
-                    "open":       float(today["Open"]),
-                    "high":       float(today["High"]),
-                    "low":        float(today["Low"]),
-                    "volume":     float(today["Volume"]),
-                    "change_pct": float(chg),
-                    "prev_close": float(prev["Close"]),
-                }
-            except Exception as e:
-                log.debug("Quote parse failed for %s: %s", ticker, e)
-    except Exception as exc:
-        log.error("Batch quote failed: %s", exc)
+        except RuntimeError as exc:
+            if "dictionary changed size" in str(exc) and attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            log.error("Batch quote failed: %s", exc)
+            return results
+        except Exception as exc:
+            log.error("Batch quote failed: %s", exc)
+            return results
     return results
 
 
