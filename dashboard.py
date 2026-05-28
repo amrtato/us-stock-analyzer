@@ -64,6 +64,19 @@ st.markdown("""
     .tf-swing  { background: #00aaff; color: white; }
     .tf-invest { background: #00cc66; color: white; }
     .tf-watch  { background: #555; color: #ccc; }
+    .status-banner {
+        border-radius: 10px; padding: 18px 24px; margin: 10px 0 16px 0;
+        display: flex; align-items: center; gap: 20px;
+    }
+    .status-pill {
+        display: inline-block; padding: 5px 16px; border-radius: 20px;
+        font-weight: bold; font-size: 1em; letter-spacing: 0.5px;
+    }
+    .advice-box {
+        background: #1a1f2e; border-left: 4px solid #00aaff;
+        border-radius: 0 8px 8px 0; padding: 16px 20px; margin: 10px 0;
+        font-size: 0.92em; line-height: 1.7;
+    }
     div[data-testid="stMetricValue"] { font-size: 1.6rem !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -257,6 +270,50 @@ def colour_chg(val):
         return ""
 
 
+def show_status_banner(stock: StockScore):
+    """Prominent coloured banner: status pill + risk badge + score + quick metrics."""
+    sc = stock.status_color
+    rc = stock.risk_color
+    st.markdown(
+        f"""
+        <div class="status-banner" style="background: linear-gradient(135deg, {sc}18, #1e1e2e);">
+            <div>
+                <span class="status-pill" style="background:{sc}33; color:{sc}; border:1.5px solid {sc};">
+                    {stock.status_emoji} {stock.market_status.upper()}
+                </span>
+            </div>
+            <div>
+                <span class="status-pill" style="background:{rc}22; color:{rc}; border:1.5px solid {rc};">
+                    {stock.risk_emoji} {stock.risk_rating.upper()} RISK
+                </span>
+            </div>
+            <div style="flex:1; text-align:right; color:#aaa; font-size:0.9em;">
+                Score&nbsp;<b style="color:{sc}; font-size:1.3em;">{stock.total_score:.1f}</b>
+                &nbsp;/&nbsp;100&nbsp;&nbsp;|&nbsp;&nbsp;
+                Grade&nbsp;<b style="color:{sc};">{stock.grade}</b>
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                R:R&nbsp;<b style="color:#00aaff;">{stock.risk_reward:.1f}x</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def show_trade_advice(stock: StockScore):
+    """Render the AI-generated trade advice in a styled box."""
+    border_color = stock.status_color
+    # Replace newlines with HTML breaks for the markdown box
+    advice_html = stock.trade_advice.replace("\n\n", "<br><br>").replace("\n", "<br>")
+    # Highlight key numbers in the advice
+    st.markdown(
+        f'<div class="advice-box" style="border-left-color:{border_color};">'
+        f"📋 <b>Trade Advice</b><br><br>{advice_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ── Chart builders ─────────────────────────────────────────────────────────────
 
 def build_price_chart(ticker: str, df: pd.DataFrame) -> go.Figure:
@@ -376,6 +433,12 @@ def build_sector_chart(sector_returns: dict) -> go.Figure:
 
 def show_stock_analysis(stock: StockScore):
     """Render the complete analysis panel for any StockScore."""
+    # ── Status banner + trade advice (always shown first) ─────────────────────
+    show_status_banner(stock)
+    if stock.trade_advice:
+        show_trade_advice(stock)
+    st.divider()
+
     d_left, d_right = st.columns([2, 1])
 
     with d_left:
@@ -400,8 +463,20 @@ def show_stock_analysis(stock: StockScore):
         st.markdown(tf_badges_html(stock), unsafe_allow_html=True)
 
     st.markdown("#### 📐 Trade Levels")
-    l1, l2, l3, l4, l5 = st.columns(5)
     entry = stock.entry or stock.price
+    # Entry zone highlight
+    if stock.entry_zone_low and stock.entry_zone_high:
+        st.markdown(
+            f'<div style="background:#00aaff18; border:1px solid #00aaff44; border-radius:8px; '
+            f'padding:8px 16px; margin-bottom:8px; font-size:0.9em;">'
+            f'🎯 <b>Optimal Entry Zone:</b>&nbsp; '
+            f'<span style="color:#00aaff; font-size:1.1em; font-weight:bold;">'
+            f'${stock.entry_zone_low:,.2f} – ${stock.entry_zone_high:,.2f}</span>'
+            f'&nbsp;&nbsp;(reference entry: ${entry:,.2f})'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    l1, l2, l3, l4, l5 = st.columns(5)
     l1.metric("Entry",       f"${entry:,.2f}")
     l2.metric("Stop Loss",   f"${stock.stop_loss:,.2f}",
               f"-{(entry - stock.stop_loss) / entry * 100:.1f}%" if entry else "")
@@ -409,7 +484,7 @@ def show_stock_analysis(stock: StockScore):
               f"+{(stock.target_1 - entry) / entry * 100:.1f}%" if entry else "")
     l4.metric("Target 2",    f"${stock.target_2:,.2f}",
               f"+{(stock.target_2 - entry) / entry * 100:.1f}%" if entry else "")
-    l5.metric("Risk:Reward", f"{stock.risk_reward}x")
+    l5.metric("Risk:Reward", f"{stock.risk_reward:.1f}x")
 
     st.markdown("#### 📡 Technical Indicators")
     t1, t2, t3, t4, t5, t6, t7, t8 = st.columns(8)
@@ -447,23 +522,29 @@ def make_scores_df(scores: list, extra_cols: bool = False) -> pd.DataFrame:
     rows   = []
     for i, s in enumerate(ranked, 1):
         row = {
-            "Rank":   i,
-            "Ticker": s.ticker,
-            "Name":   s.name[:26],
-            "Price":  f"${s.price:,.2f}",
-            "Chg %":  f"{s.change_pct:+.2f}%",
-            "Score":  round(s.total_score, 1),
-            "Grade":  s.grade,
-            "Tech":   round(s.tech_score,  0),
-            "Fund":   round(s.fund_score,  0),
-            "Sent":   round(s.sent_score,  0),
-            "Macro":  round(s.macro_score, 0),
-            "TFs":    " | ".join(s.timeframes),
-            "Entry":  f"${s.entry:,.2f}",
-            "Stop":   f"${s.stop_loss:,.2f}",
-            "T1":     f"${s.target_1:,.2f}",
-            "T2":     f"${s.target_2:,.2f}",
-            "R:R":    f"{s.risk_reward}x",
+            "Rank":    i,
+            "Ticker":  s.ticker,
+            "Name":    s.name[:22],
+            "Price":   f"${s.price:,.2f}",
+            "Chg %":   f"{s.change_pct:+.2f}%",
+            "Status":  f"{s.status_emoji} {s.market_status}",
+            "Risk":    f"{s.risk_emoji} {s.risk_rating}",
+            "Score":   round(s.total_score, 1),
+            "Grade":   s.grade,
+            "Tech":    round(s.tech_score,  0),
+            "Fund":    round(s.fund_score,  0),
+            "Sent":    round(s.sent_score,  0),
+            "Macro":   round(s.macro_score, 0),
+            "TFs":     " | ".join(s.timeframes),
+            "Entry":   f"${s.entry:,.2f}",
+            "Entry Zone": (
+                f"${s.entry_zone_low:,.2f}–${s.entry_zone_high:,.2f}"
+                if s.entry_zone_low else "—"
+            ),
+            "Stop":    f"${s.stop_loss:,.2f}",
+            "T1":      f"${s.target_1:,.2f}",
+            "T2":      f"${s.target_2:,.2f}",
+            "R:R":     f"{s.risk_reward:.1f}x",
         }
         if extra_cols:
             row["Sector"] = s.sector
