@@ -9,6 +9,7 @@ Tabs:
 Launch:
     streamlit run dashboard.py
 """
+import os
 import sys
 import json
 import time
@@ -208,6 +209,33 @@ def _mark_loaded(cache_key: str) -> None:
     st.session_state["_loaded_keys"].add(cache_key)
 
 
+# ── Watch List file persistence ────────────────────────────────────────────────
+# Stored in the user's home directory so it survives Azure zip-deploys.
+# In Azure App Service the /home directory is on Azure Files and IS persistent.
+_WATCHLIST_FILE = os.path.join(os.path.expanduser("~"), ".us_stock_watchlist.json")
+
+
+def _load_watchlist_file() -> list:
+    """Return persisted watch-list tickers. Returns [] if file is absent/invalid."""
+    try:
+        with open(_WATCHLIST_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [str(t).upper().strip() for t in data if str(t).strip()]
+    except Exception:
+        pass
+    return []
+
+
+def _save_watchlist_file(tickers: list) -> None:
+    """Write watch-list tickers to disk (survives page refreshes and restarts)."""
+    try:
+        with open(_WATCHLIST_FILE, "w") as f:
+            json.dump([str(t).upper() for t in tickers], f)
+    except Exception as exc:
+        logging.warning("watchlist save failed: %s", exc)
+
+
 # ── Cached data fetchers ───────────────────────────────────────────────────────
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -238,6 +266,14 @@ def get_price_history(ticker: str, period: str = "6mo"):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fundamentals(ticker: str):
     return fetch_fundamentals(ticker)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_watchlist_quotes(tickers: tuple) -> dict:
+    """Batch quotes with a 60-second cache — keeps watch-list prices fresh."""
+    if not tickers:
+        return {}
+    return fetch_batch_quotes(list(tickers))
 
 
 def analyse_ticker(ticker, news_map, quotes):
@@ -919,6 +955,277 @@ def show_sector_browser(macro_flags):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Watch List
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def show_watchlist_tab(macro_flags: tuple):
+    st.markdown("## 📋 My Watch List")
+    st.caption(
+        "Add any stock by ticker or company name — live prices update every 60 s, "
+        "full analysis refreshes every 30 min."
+    )
+
+    # ── Initialise session state from persistent file ──────────────────────────
+    if "watchlist" not in st.session_state:
+        st.session_state["watchlist"] = _load_watchlist_file()
+    watchlist: list = st.session_state["watchlist"]
+
+    # ── Add stock ──────────────────────────────────────────────────────────────
+    add_col, btn_col = st.columns([5, 1])
+    with add_col:
+        new_q = st.text_input(
+            "",
+            placeholder="Ticker or company name — e.g. NVDA  ·  Palantir  ·  BRK-B",
+            label_visibility="collapsed",
+            key="wl_input",
+        )
+    with btn_col:
+        st.markdown("<br>", unsafe_allow_html=True)
+        add_clicked = st.button(
+            "➕ Add", type="primary", use_container_width=True, key="wl_add"
+        )
+
+    if add_clicked and new_q.strip():
+        with st.spinner(f"Looking up '{new_q.strip()}'…"):
+            sym, name = resolve_ticker(new_q.strip())
+        if sym:
+            if sym not in watchlist:
+                watchlist.append(sym)
+                st.session_state["watchlist"] = watchlist
+                _save_watchlist_file(watchlist)
+                st.success(f"✅ Added **{sym}** — {name}")
+                st.rerun()
+            else:
+                st.info(f"**{sym}** is already in your watch list.")
+        else:
+            st.error(
+                f"❌ Could not find **'{new_q}'**. "
+                "Try the exact ticker symbol (e.g. `NVDA`)."
+            )
+
+    # ── Empty-state placeholder ────────────────────────────────────────────────
+    if not watchlist:
+        st.markdown(
+            '<div style="text-align:center;padding:70px 20px;color:#555;">'
+            '<div style="font-size:3.2em;margin-bottom:14px;">📭</div>'
+            '<div style="font-size:1.1em;color:#888;">Your watch list is empty.</div>'
+            '<div style="font-size:.88em;margin-top:8px;">Add stocks above to start tracking them.</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    # ── Management bar: header · remove selector · refresh/remove button ───────
+    st.divider()
+    hdr_col, rm_col, act_col = st.columns([2, 4, 1])
+    with hdr_col:
+        st.markdown(
+            f"<div style='padding-top:8px;font-weight:600;font-size:1.05em;'>"
+            f"👁&nbsp; Watching {len(watchlist)} "
+            f"stock{'s' if len(watchlist) != 1 else ''}</div>",
+            unsafe_allow_html=True,
+        )
+    with rm_col:
+        to_remove = st.multiselect(
+            "remove",
+            watchlist,
+            placeholder="Select tickers to remove…",
+            label_visibility="collapsed",
+            key="wl_remove",
+        )
+    with act_col:
+        btn_label = "🗑️ Remove" if to_remove else "🔄 Refresh"
+        act_btn   = st.button(btn_label, use_container_width=True, key="wl_action")
+
+    if act_btn and to_remove:
+        for t in to_remove:
+            if t in watchlist:
+                watchlist.remove(t)
+        st.session_state["watchlist"] = watchlist
+        _save_watchlist_file(watchlist)
+        # Drop cached "loaded" marker for this watchlist so analysis re-runs
+        if "_loaded_keys" in st.session_state:
+            st.session_state["_loaded_keys"] = {
+                k for k in st.session_state["_loaded_keys"]
+                if not k.startswith("watchlist_")
+            }
+        st.rerun()
+    elif act_btn and not to_remove:
+        # Refresh: invalidate watchlist analysis marker so loading screen re-fires
+        if "_loaded_keys" in st.session_state:
+            st.session_state["_loaded_keys"] = {
+                k for k in st.session_state["_loaded_keys"]
+                if not k.startswith("watchlist_")
+            }
+        st.rerun()
+
+    if not watchlist:
+        return
+
+    # ── Live quotes (60-s cache) ───────────────────────────────────────────────
+    live_q = get_watchlist_quotes(tuple(watchlist))
+
+    # ── Full analysis — with animated loading screen on first/refresh hit ──────
+    wl_t         = tuple(watchlist)
+    wl_cache_key = f"watchlist_{hash(wl_t)}_{hash(macro_flags)}"
+    wl_n         = len(wl_t)
+    wl_est       = max(8, min(20, wl_n // 3 + 6))
+
+    if _needs_loading(wl_cache_key):
+        wl_slot = st.empty()
+        with wl_slot:
+            components.html(_make_loading_html(wl_n, wl_est), height=520, scrolling=False)
+        wl_scores = run_full_analysis(wl_t, macro_flags)
+        wl_slot.empty()
+        _mark_loaded(wl_cache_key)
+    else:
+        wl_scores = run_full_analysis(wl_t, macro_flags)
+
+    if not wl_scores:
+        st.warning(
+            "⚠️ Analysis unavailable — check your connection and press **🔄 Refresh**."
+        )
+        return
+
+    score_map = {s.ticker: s for s in wl_scores}
+
+    # ── KPI strip ──────────────────────────────────────────────────────────────
+    avg_sc  = sum(s.total_score for s in wl_scores) / len(wl_scores)
+    bull_n  = sum(1 for s in wl_scores if "Bullish" in s.market_status)
+    bear_n  = sum(1 for s in wl_scores if "Bearish" in s.market_status)
+    top_s   = max(wl_scores, key=lambda s: s.total_score)
+    top_chg = live_q.get(top_s.ticker, {}).get("change_pct", top_s.change_pct)
+
+    best_ticker = max(
+        watchlist,
+        key=lambda t: live_q.get(t, {}).get("change_pct",
+                                             score_map.get(t, top_s).change_pct),
+    )
+    best_chg = live_q.get(best_ticker, {}).get(
+        "change_pct", score_map.get(best_ticker, top_s).change_pct
+    )
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Avg Score",              f"{avg_sc:.1f}")
+    k2.metric("🐂 Bullish",              f"{bull_n} / {len(wl_scores)}")
+    k3.metric("🐻 Bearish",              f"{bear_n} / {len(wl_scores)}")
+    k4.metric(f"🏆 Best Score: {top_s.ticker}",
+              f"{top_s.total_score:.1f} ({top_s.grade})", f"{top_chg:+.1f}%")
+    k5.metric(f"📈 Today's Leader: {best_ticker}",
+              f"{live_q.get(best_ticker,{}).get('price', score_map.get(best_ticker,top_s).price):,.2f}",
+              f"{best_chg:+.2f}%")
+
+    st.divider()
+
+    # ── Live price cards ───────────────────────────────────────────────────────
+    st.subheader("💰 Live Prices")
+    cols_per_row = min(5, len(watchlist))
+    chunks       = [
+        watchlist[i: i + cols_per_row]
+        for i in range(0, len(watchlist), cols_per_row)
+    ]
+    for chunk in chunks:
+        card_cols = st.columns(cols_per_row)
+        for ci, ticker in enumerate(chunk):
+            q   = live_q.get(ticker, {})
+            s   = score_map.get(ticker)
+            px  = q.get("price",      s.price      if s else 0.0)
+            ch  = q.get("change_pct", s.change_pct if s else 0.0)
+            vol = q.get("volume",     0)
+            with card_cols[ci]:
+                st.metric(
+                    label=f"{s.status_emoji + ' ' if s else ''}**{ticker}**",
+                    value=f"${px:,.2f}",
+                    delta=f"{ch:+.2f}%",
+                    delta_color="normal" if ch >= 0 else "inverse",
+                )
+                if s:
+                    sc  = s.total_score
+                    clr = score_color(sc)
+                    st.markdown(
+                        f'<div style="height:5px;border-radius:3px;'
+                        f'background:#1a1a2e;margin:-6px 0 4px;">'
+                        f'<div style="width:{sc:.0f}%;height:100%;'
+                        f'background:{clr};border-radius:3px;"></div></div>'
+                        f'<div style="font-size:.74em;color:#777;text-align:center;">'
+                        f'{s.risk_emoji}&nbsp;{s.risk_rating}&nbsp;·&nbsp;'
+                        f'Score&nbsp;<b style="color:{clr};">{sc:.0f}</b></div>',
+                        unsafe_allow_html=True,
+                    )
+                    if vol:
+                        st.caption(f"Vol: {vol/1e6:.1f}M")
+
+    st.caption("Prices update every 60 s · Analysis refreshes every 30 min")
+    st.divider()
+
+    # ── Score comparison chart ─────────────────────────────────────────────────
+    st.subheader("📊 Score Comparison")
+    st.plotly_chart(build_score_bar(wl_scores, height=max(240, wl_n * 24)), width='stretch')
+    st.divider()
+
+    # ── Detailed table ─────────────────────────────────────────────────────────
+    st.subheader("📋 Detailed Overview")
+    rows = []
+    for ticker in watchlist:
+        q  = live_q.get(ticker, {})
+        s  = score_map.get(ticker)
+        px = q.get("price",      s.price      if s else 0.0)
+        ch = q.get("change_pct", s.change_pct if s else 0.0)
+        rows.append({
+            "Ticker":     ticker,
+            "Name":       s.name[:22] if s else ticker,
+            "Price":      f"${px:,.2f}",
+            "Chg %":      f"{ch:+.2f}%",
+            "Status":     f"{s.status_emoji} {s.market_status}" if s else "—",
+            "Risk":       f"{s.risk_emoji} {s.risk_rating}"     if s else "—",
+            "Score":      round(s.total_score, 1)               if s else 0,
+            "Grade":      s.grade                               if s else "—",
+            "Tech":       round(s.tech_score,  0)               if s else 0,
+            "Fund":       round(s.fund_score,  0)               if s else 0,
+            "Entry":      f"${s.entry:,.2f}"                    if s else "—",
+            "Entry Zone": (
+                f"${s.entry_zone_low:,.2f}–${s.entry_zone_high:,.2f}"
+                if s and s.entry_zone_low else "—"
+            ),
+            "Stop":       f"${s.stop_loss:,.2f}"                if s else "—",
+            "T1":         f"${s.target_1:,.2f}"                 if s else "—",
+            "T2":         f"${s.target_2:,.2f}"                 if s else "—",
+            "R:R":        f"{s.risk_reward:.1f}x"               if s else "—",
+        })
+
+    df_wl  = pd.DataFrame(rows)
+    styled = (
+        df_wl.style
+        .map(colour_score, subset=["Score", "Tech", "Fund"])
+        .map(colour_chg,   subset=["Chg %"])
+    )
+    st.dataframe(styled, width="stretch", hide_index=True,
+                 height=min(600, 60 + len(rows) * 38))
+    st.divider()
+
+    # ── Individual deep dive ───────────────────────────────────────────────────
+    st.subheader("🔍 Deep Dive")
+    valid = sorted(
+        [t for t in watchlist if t in score_map],
+        key=lambda t: score_map[t].total_score,
+        reverse=True,
+    )
+    if valid:
+        choices = [
+            f"{score_map[t].ticker} — {score_map[t].name[:30]}  "
+            f"(Score: {score_map[t].total_score:.1f})"
+            for t in valid
+        ]
+        pick = st.selectbox("Select a stock for full analysis:", choices, key="wl_pick")
+        sym  = pick.split(" — ")[0].strip()
+        if sym in score_map:
+            show_stock_analysis(score_map[sym])
+
+    st.divider()
+    st.caption("⚠️ For informational purposes only. Not financial advice.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -982,10 +1289,11 @@ def main():
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📈 Daily Top Picks",
         "🔍 Stock Search",
         "🏭 Sector Browser",
+        "📋 Watch List",
     ])
 
     with tab1:
@@ -996,6 +1304,9 @@ def main():
 
     with tab3:
         show_sector_browser(macro_flags)
+
+    with tab4:
+        show_watchlist_tab(macro_flags)
 
 
 if __name__ == "__main__":
