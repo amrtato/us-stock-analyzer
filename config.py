@@ -46,6 +46,50 @@ SP500_TOP = [
 # Deduplicated full universe
 ALL_STOCKS = sorted(set(DJIA_STOCKS + NASDAQ_TOP + SP500_TOP))
 
+# ── Sector Stocks for Browser (20 curated stocks per sector) ──────────────────
+SECTOR_STOCKS = {
+    "Technology": [
+        "AAPL", "MSFT", "NVDA", "AMD",  "AVGO", "QCOM", "AMAT", "INTC", "ADBE", "CRM",
+        "NOW",  "CRWD", "ORCL", "IBM",  "CSCO", "ADI",  "MRVL", "PANW", "TTD",  "KLAC",
+    ],
+    "Consumer": [
+        "AMZN", "TSLA", "COST", "WMT",  "HD",   "MCD",  "SBUX", "NKE",  "TGT",  "NFLX",
+        "BKNG", "ABNB", "MELI", "KO",   "PG",   "MDLZ", "LOW",  "DG",   "YUM",  "CMG",
+    ],
+    "Financials": [
+        "JPM",  "GS",   "MS",   "BAC",  "WFC",  "USB",  "COF",  "AXP",  "V",    "MA",
+        "PYPL", "BLK",  "SPGI", "TRV",  "AFL",  "C",    "BK",   "SCHW", "ICE",  "CME",
+    ],
+    "Healthcare": [
+        "JNJ",  "UNH",  "LLY",  "MRK",  "AMGN", "GILD", "REGN", "VRTX", "ISRG", "MDT",
+        "ZTS",  "ELV",  "CI",   "HCA",  "BMY",  "PFE",  "ABT",  "CVS",  "IDXX", "SYK",
+    ],
+    "Industrials": [
+        "CAT",  "BA",   "HON",  "GE",   "RTX",  "DE",   "MMM",  "UPS",  "FDX",  "LMT",
+        "NOC",  "GD",   "ITW",  "ETN",  "EMR",  "CSX",  "NSC",  "FAST", "PCAR", "PAYX",
+    ],
+    "Energy": [
+        "CVX",  "XOM",  "COP",  "EOG",  "SLB",  "MPC",  "VLO",  "PSX",  "OXY",  "HAL",
+        "BKR",  "HES",  "DVN",  "MRO",  "WMB",  "KMI",  "LNG",  "APA",  "CTRA", "MTDR",
+    ],
+    "Communication": [
+        "GOOGL","META", "DIS",  "VZ",   "TMUS", "NFLX", "T",    "CMCSA","EA",   "TTWO",
+        "WBD",  "SPOT", "PINS", "SNAP", "RBLX", "IPG",  "OMC",  "FOXA", "LYV",  "ZM",
+    ],
+    "Materials": [
+        "LIN",  "APD",  "ECL",  "SHW",  "NEM",  "FCX",  "AA",   "VMC",  "MLM",  "DOW",
+        "DD",   "PPG",  "NUE",  "STLD", "CF",   "MOS",  "ALB",  "IFF",  "EMN",  "PKG",
+    ],
+    "Utilities": [
+        "NEE",  "SO",   "DUK",  "D",    "AEP",  "EXC",  "SRE",  "XEL",  "WEC",  "DTE",
+        "AES",  "PPL",  "ETR",  "PNW",  "AWK",  "FE",   "LNT",  "NI",   "CMS",  "EVRG",
+    ],
+    "Real Estate": [
+        "PLD",  "AMT",  "CCI",  "EQIX", "SPG",  "O",    "WELL", "DLR",  "PSA",  "EQR",
+        "AVB",  "MAA",  "UDR",  "CPT",  "ESS",  "VTR",  "ARE",  "BXP",  "KIM",  "REG",
+    ],
+}
+
 # Sector mapping for rotation analysis
 SECTOR_MAP = {
     "Technology": ["AAPL", "MSFT", "NVDA", "AMD", "INTC", "QCOM", "AVGO", "AMAT", "LRCX",

@@ -1,6 +1,11 @@
 """
 US Stock Analyzer — Streamlit Dashboard
 
+Tabs:
+  1. Daily Top Picks  — ranked top-N from the selected universe
+  2. Stock Search     — analyse any ticker or company name on demand
+  3. Sector Browser   — compare top 20 stocks in each market sector
+
 Launch:
     streamlit run dashboard.py
 """
@@ -17,9 +22,12 @@ sys.path.insert(0, ".")
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+import yfinance as yf
 
-from config import ALL_STOCKS, DJIA_STOCKS, NASDAQ_TOP, SP500_TOP, SECTOR_MAP
+from config import (
+    ALL_STOCKS, DJIA_STOCKS, NASDAQ_TOP, SP500_TOP,
+    SECTOR_MAP, SECTOR_STOCKS,
+)
 from data.fetcher import fetch_price_history, fetch_fundamentals, fetch_batch_quotes
 from data.news_fetcher import fetch_rss_news, aggregate_ticker_news
 from analyzers.technical import analyse_technical
@@ -60,12 +68,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
-# ── Sector ETFs for rotation ───────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
 SECTOR_ETFS = {
     "Technology": "XLK", "Financials": "XLF", "Healthcare": "XLV",
     "Consumer": "XLY",   "Industrials": "XLI", "Energy": "XLE",
     "Communication": "XLC", "Materials": "XLB", "Utilities": "XLU",
+}
+
+SECTOR_ICONS = {
+    "Technology": "💻", "Consumer": "🛍️",  "Financials": "🏦",
+    "Healthcare": "💊", "Industrials": "⚙️", "Energy": "⛽",
+    "Communication": "📡", "Materials": "🪨", "Utilities": "⚡",
+    "Real Estate": "🏢",
 }
 
 
@@ -73,9 +87,12 @@ SECTOR_ETFS = {
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_sector_returns():
-    etfs = list(SECTOR_ETFS.values())
+    etfs   = list(SECTOR_ETFS.values())
     quotes = fetch_batch_quotes(etfs)
-    return {sec: quotes[etf]["change_pct"] for sec, etf in SECTOR_ETFS.items() if etf in quotes}
+    return {
+        sec: quotes[etf]["change_pct"]
+        for sec, etf in SECTOR_ETFS.items() if etf in quotes
+    }
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -117,7 +134,6 @@ def analyse_ticker(ticker, news_map, quotes):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def run_full_analysis(tickers: tuple, macro_flags: tuple) -> list:
-    # Apply macro flags
     flags_dict = dict(macro_flags)
     for k, v in flags_dict.items():
         MACRO_FLAGS[k] = v
@@ -138,7 +154,63 @@ def run_full_analysis(tickers: tuple, macro_flags: tuple) -> list:
     return scores
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def resolve_ticker(query: str):
+    """Resolve a company name or ticker symbol → (ticker, full_name) or (None, None)."""
+    q     = query.strip()
+    upper = q.upper()
+
+    # 1. Try as a direct ticker symbol
+    try:
+        t     = yf.Ticker(upper)
+        fi    = t.fast_info
+        price = fi.last_price
+        if price and float(price) > 0:
+            name = upper
+            try:
+                bi = t.basic_info
+                if bi:
+                    name = getattr(bi, "long_name", upper) or upper
+            except Exception:
+                pass
+            return upper, name
+    except Exception:
+        pass
+
+    # 2. Fall back to yfinance full-text search
+    try:
+        results = yf.Search(q, news_count=0, max_results=10).quotes
+        if results:
+            for r in results:
+                if r.get("quoteType", "") in ("EQUITY", "ETF"):
+                    sym  = r.get("symbol", "")
+                    name = r.get("longname") or r.get("shortname") or sym
+                    return sym, name
+            # Fallback: first result regardless of type
+            r    = results[0]
+            sym  = r.get("symbol", "")
+            name = r.get("longname") or r.get("shortname") or sym
+            return sym, name
+    except Exception:
+        pass
+
+    return None, None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def analyse_single_ticker(ticker: str, macro_flags: tuple):
+    """Run the full multi-factor analysis pipeline on a single ticker."""
+    flags_dict = dict(macro_flags)
+    for k, v in flags_dict.items():
+        MACRO_FLAGS[k] = v
+    sector_returns = get_sector_returns()
+    update_sector_momentum(sector_returns)
+    quotes   = get_batch_quotes((ticker,))
+    news_map = get_news((ticker,))
+    return analyse_ticker(ticker, news_map, quotes)
+
+
+# ── Visual helpers ─────────────────────────────────────────────────────────────
 
 def grade_color(grade: str) -> str:
     if "A" in grade: return "#00ff88"
@@ -155,65 +227,66 @@ def score_color(score: float) -> str:
 
 
 def tf_badges_html(stock: StockScore) -> str:
-    tags = stock.timeframes
     style = {"SCALP": "tf-scalp", "DAY": "tf-day", "SWING": "tf-swing",
              "INVEST": "tf-invest", "WATCH": "tf-watch"}
     icons = {"SCALP": "⚡", "DAY": "📅", "SWING": "📈", "INVEST": "💼", "WATCH": "👁"}
     parts = []
-    for t in tags:
+    for t in stock.timeframes:
         css  = style.get(t, "tf-watch")
         icon = icons.get(t, "")
         parts.append(f'<span class="tf-badge {css}">{icon} {t}</span>')
     return " ".join(parts)
 
 
-def chg_arrow(pct: float) -> str:
-    return f"{'▲' if pct >= 0 else '▼'} {abs(pct):.2f}%"
+def colour_score(val):
+    try:
+        v = float(val)
+        if v >= 72: return "color: #00ff88; font-weight: bold"
+        if v >= 60: return "color: #ffd700; font-weight: bold"
+        if v >= 48: return "color: #ff8c00"
+        return "color: #ff4444"
+    except Exception:
+        return ""
 
 
-# ── Price chart with TA overlays ───────────────────────────────────────────────
+def colour_chg(val):
+    try:
+        v = float(str(val).replace("%", ""))
+        return "color: #00ff88" if v >= 0 else "color: #ff4444"
+    except Exception:
+        return ""
+
+
+# ── Chart builders ─────────────────────────────────────────────────────────────
 
 def build_price_chart(ticker: str, df: pd.DataFrame) -> go.Figure:
-    from analyzers.technical import _ema, _sma, compute_rsi, compute_bollinger
+    from analyzers.technical import _ema, compute_bollinger
 
     close = df["Close"].squeeze()
     high  = df["High"].squeeze()
     low   = df["Low"].squeeze()
-    vol   = df["Volume"].squeeze()
 
-    ema9   = _ema(close, 9)
-    ema21  = _ema(close, 21)
-    ema50  = _ema(close, 50)
-    ema200 = _ema(close, 200)
+    ema9,  ema21  = _ema(close, 9),  _ema(close, 21)
+    ema50, ema200 = _ema(close, 50), _ema(close, 200)
     bb_up, bb_mid, bb_lo = compute_bollinger(close)
-    rsi = compute_rsi(close)
 
     fig = go.Figure()
-
-    # Candlestick
     fig.add_trace(go.Candlestick(
-        x=df.index, open=df["Open"].squeeze(), high=high,
-        low=low, close=close,
+        x=df.index, open=df["Open"].squeeze(), high=high, low=low, close=close,
         name=ticker,
         increasing_line_color="#00ff88", decreasing_line_color="#ff4444",
     ))
-
-    # Bollinger Bands
     fig.add_trace(go.Scatter(x=df.index, y=bb_up, name="BB Upper",
         line=dict(color="rgba(100,150,255,0.4)", width=1, dash="dot"), showlegend=False))
     fig.add_trace(go.Scatter(x=df.index, y=bb_lo, name="BB Lower",
         fill="tonexty", fillcolor="rgba(100,150,255,0.05)",
         line=dict(color="rgba(100,150,255,0.4)", width=1, dash="dot"), showlegend=False))
-
-    # EMAs
     fig.add_trace(go.Scatter(x=df.index, y=ema9,   name="EMA9",   line=dict(color="#ff9500", width=1)))
     fig.add_trace(go.Scatter(x=df.index, y=ema21,  name="EMA21",  line=dict(color="#ffcc00", width=1)))
     fig.add_trace(go.Scatter(x=df.index, y=ema50,  name="EMA50",  line=dict(color="#00aaff", width=1.5)))
     fig.add_trace(go.Scatter(x=df.index, y=ema200, name="EMA200", line=dict(color="#ff4444", width=1.5)))
-
     fig.update_layout(
-        template="plotly_dark",
-        height=420,
+        template="plotly_dark", height=420,
         margin=dict(l=0, r=0, t=30, b=0),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -224,14 +297,12 @@ def build_price_chart(ticker: str, df: pd.DataFrame) -> go.Figure:
 
 def build_rsi_chart(ticker: str, df: pd.DataFrame) -> go.Figure:
     from analyzers.technical import compute_rsi
-    close = df["Close"].squeeze()
-    rsi   = compute_rsi(close)
-
+    rsi = compute_rsi(df["Close"].squeeze())
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df.index, y=rsi, name="RSI", line=dict(color="#00aaff", width=2)))
     fig.add_hline(y=70, line_dash="dash", line_color="#ff4444", annotation_text="70")
     fig.add_hline(y=30, line_dash="dash", line_color="#00ff88", annotation_text="30")
-    fig.add_hline(y=50, line_dash="dot", line_color="#888", line_width=1)
+    fig.add_hline(y=50, line_dash="dot",  line_color="#888",   line_width=1)
     fig.update_layout(
         template="plotly_dark", height=160,
         margin=dict(l=0, r=0, t=20, b=0),
@@ -242,21 +313,23 @@ def build_rsi_chart(ticker: str, df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def build_score_bar(scores: list[StockScore]) -> go.Figure:
-    top30 = sorted(scores, key=lambda s: s.total_score, reverse=True)[:30]
-    colors = [score_color(s.total_score) for s in top30]
-
+def build_score_bar(scores: list, height: int = 300) -> go.Figure:
+    top = sorted(scores, key=lambda s: s.total_score, reverse=True)[:30]
     fig = go.Figure(go.Bar(
-        x=[s.ticker for s in top30],
-        y=[s.total_score for s in top30],
-        marker_color=colors,
-        text=[f"{s.total_score:.1f}" for s in top30],
+        x=[s.ticker for s in top],
+        y=[s.total_score for s in top],
+        marker_color=[score_color(s.total_score) for s in top],
+        text=[f"{s.total_score:.1f}" for s in top],
         textposition="outside",
-        customdata=[[s.grade, s.sector, ", ".join(s.timeframes)] for s in top30],
-        hovertemplate="<b>%{x}</b><br>Score: %{y:.1f}<br>Grade: %{customdata[0]}<br>Sector: %{customdata[1]}<br>TF: %{customdata[2]}<extra></extra>",
+        customdata=[[s.grade, s.sector, ", ".join(s.timeframes)] for s in top],
+        hovertemplate=(
+            "<b>%{x}</b><br>Score: %{y:.1f}<br>"
+            "Grade: %{customdata[0]}<br>Sector: %{customdata[1]}<br>"
+            "TF: %{customdata[2]}<extra></extra>"
+        ),
     ))
     fig.update_layout(
-        template="plotly_dark", height=300,
+        template="plotly_dark", height=height,
         margin=dict(l=0, r=0, t=10, b=0),
         yaxis=dict(range=[0, 105], title="Score"),
         xaxis=dict(tickangle=-45),
@@ -266,14 +339,11 @@ def build_score_bar(scores: list[StockScore]) -> go.Figure:
 
 
 def build_radar(stock: StockScore) -> go.Figure:
-    categories = ["Technical", "Fundamental", "Sentiment", "Macro"]
-    values     = [stock.tech_score, stock.fund_score, stock.sent_score, stock.macro_score]
-
+    cats = ["Technical", "Fundamental", "Sentiment", "Macro"]
+    vals = [stock.tech_score, stock.fund_score, stock.sent_score, stock.macro_score]
     fig = go.Figure(go.Scatterpolar(
-        r=values + [values[0]],
-        theta=categories + [categories[0]],
-        fill="toself",
-        fillcolor="rgba(0,170,255,0.2)",
+        r=vals + [vals[0]], theta=cats + [cats[0]],
+        fill="toself", fillcolor="rgba(0,170,255,0.2)",
         line=dict(color="#00aaff", width=2),
     ))
     fig.update_layout(
@@ -288,35 +358,358 @@ def build_radar(stock: StockScore) -> go.Figure:
 def build_sector_chart(sector_returns: dict) -> go.Figure:
     sectors = list(sector_returns.keys())
     returns = [sector_returns[s] for s in sectors]
-    colors  = ["#00ff88" if r >= 0 else "#ff4444" for r in returns]
-
     fig = go.Figure(go.Bar(
-        x=[f"{r:+.1f}%" for r in returns],
-        y=sectors,
+        x=[f"{r:+.1f}%" for r in returns], y=sectors,
         orientation="h",
-        marker_color=colors,
-        text=[f"{r:+.1f}%" for r in returns],
-        textposition="outside",
+        marker_color=["#00ff88" if r >= 0 else "#ff4444" for r in returns],
+        text=[f"{r:+.1f}%" for r in returns], textposition="outside",
     ))
     fig.update_layout(
         template="plotly_dark", height=280,
         margin=dict(l=0, r=40, t=10, b=0),
-        xaxis=dict(title="1-Day Return %"),
-        showlegend=False,
+        xaxis=dict(title="1-Day Return %"), showlegend=False,
     )
     return fig
 
 
-# ── Main dashboard ─────────────────────────────────────────────────────────────
+# ── Shared stock-detail view (reused by all three tabs) ────────────────────────
+
+def show_stock_analysis(stock: StockScore):
+    """Render the complete analysis panel for any StockScore."""
+    d_left, d_right = st.columns([2, 1])
+
+    with d_left:
+        df_chart = get_price_history(stock.ticker, "6mo")
+        if not df_chart.empty:
+            st.plotly_chart(build_price_chart(stock.ticker, df_chart), width='stretch')
+            st.plotly_chart(build_rsi_chart(stock.ticker, df_chart), width='stretch')
+
+    with d_right:
+        st.plotly_chart(build_radar(stock), width='stretch')
+        st.markdown(f"### {stock.ticker} — {stock.grade}")
+        ind = stock.indicators
+        m   = st.columns(2)
+        m[0].metric("Price", f"${stock.price:,.2f}", f"{stock.change_pct:+.2f}%")
+        m[1].metric("Score", f"{stock.total_score:.1f}", stock.grade)
+        st.markdown(
+            f"**Sector:** {stock.sector}  |  "
+            f"**Beta:** {stock.beta:.2f}  |  "
+            f"**ATR:** ${stock.atr:.2f} ({stock.atr_pct:.1f}%)"
+        )
+        st.markdown("**Timeframes:**")
+        st.markdown(tf_badges_html(stock), unsafe_allow_html=True)
+
+    st.markdown("#### 📐 Trade Levels")
+    l1, l2, l3, l4, l5 = st.columns(5)
+    entry = stock.entry or stock.price
+    l1.metric("Entry",       f"${entry:,.2f}")
+    l2.metric("Stop Loss",   f"${stock.stop_loss:,.2f}",
+              f"-{(entry - stock.stop_loss) / entry * 100:.1f}%" if entry else "")
+    l3.metric("Target 1",    f"${stock.target_1:,.2f}",
+              f"+{(stock.target_1 - entry) / entry * 100:.1f}%" if entry else "")
+    l4.metric("Target 2",    f"${stock.target_2:,.2f}",
+              f"+{(stock.target_2 - entry) / entry * 100:.1f}%" if entry else "")
+    l5.metric("Risk:Reward", f"{stock.risk_reward}x")
+
+    st.markdown("#### 📡 Technical Indicators")
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.columns(8)
+    t1.metric("RSI (14)",  ind.get("rsi",      "—"))
+    t2.metric("ADX",       ind.get("adx",      "—"))
+    t3.metric("Stoch K",   ind.get("stoch_k",  "—"))
+    t4.metric("Vol Ratio", f"{ind.get('vol_ratio', '—')}x")
+    t5.metric("EMA 50",    f"${ind.get('ema50',   '—')}")
+    t6.metric("EMA 200",   f"${ind.get('ema200',  '—')}")
+    t7.metric("ROC 5d",    f"{ind.get('roc5',     '—')}%")
+    t8.metric("ROC 20d",   f"{ind.get('roc20',    '—')}%")
+
+    fm = stock.fund_metrics
+    if fm:
+        st.markdown("#### 💼 Fundamentals")
+        f1, f2, f3, f4, f5, f6 = st.columns(6)
+        f1.metric("P/E Ratio",  fm.get("pe",             "—"))
+        f2.metric("PEG Ratio",  fm.get("peg",            "—"))
+        f3.metric("ROE",        fm.get("roe",            "—"))
+        f4.metric("Rev Growth", fm.get("revenue_growth", "—"))
+        f5.metric("EPS Growth", fm.get("earnings_growth","—"))
+        f6.metric("Mkt Cap",    f"${fm.get('market_cap_b', '—')}B")
+
+    if stock.signals:
+        st.markdown("#### 🚦 Signals & Catalysts")
+        sig_cols = st.columns(2)
+        for i, sig in enumerate(stock.signals[:10]):
+            sig_cols[i % 2].markdown(f"• {sig}")
+
+
+# ── Helper: styled scores dataframe ───────────────────────────────────────────
+
+def make_scores_df(scores: list, extra_cols: bool = False) -> pd.DataFrame:
+    ranked = sorted(scores, key=lambda s: s.total_score, reverse=True)
+    rows   = []
+    for i, s in enumerate(ranked, 1):
+        row = {
+            "Rank":   i,
+            "Ticker": s.ticker,
+            "Name":   s.name[:26],
+            "Price":  f"${s.price:,.2f}",
+            "Chg %":  f"{s.change_pct:+.2f}%",
+            "Score":  round(s.total_score, 1),
+            "Grade":  s.grade,
+            "Tech":   round(s.tech_score,  0),
+            "Fund":   round(s.fund_score,  0),
+            "Sent":   round(s.sent_score,  0),
+            "Macro":  round(s.macro_score, 0),
+            "TFs":    " | ".join(s.timeframes),
+            "Entry":  f"${s.entry:,.2f}",
+            "Stop":   f"${s.stop_loss:,.2f}",
+            "T1":     f"${s.target_1:,.2f}",
+            "T2":     f"${s.target_2:,.2f}",
+            "R:R":    f"{s.risk_reward}x",
+        }
+        if extra_cols:
+            row["Sector"] = s.sector
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Daily Top Picks
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def show_daily_tab(tickers, top_n, macro_flags):
+    with st.spinner(f"Analysing {len(tickers)} stocks… (cached after first run)"):
+        scores = run_full_analysis(tuple(tickers), macro_flags)
+
+    if not scores:
+        st.error("No data returned. Check your internet connection.")
+        return
+
+    ranked        = rank_stocks(scores, top_n)
+    sector_returns = get_sector_returns()
+    best_sec  = max(sector_returns, key=sector_returns.get) if sector_returns else "—"
+    worst_sec = min(sector_returns, key=sector_returns.get) if sector_returns else "—"
+    avg_score = sum(s.total_score for s in scores) / len(scores)
+    top_stock = ranked[0]
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Stocks Analysed",    len(scores))
+    k2.metric("Universe Avg Score", f"{avg_score:.1f}")
+    k3.metric(f"#1 Pick: {top_stock.ticker}",
+              f"{top_stock.total_score:.1f} ({top_stock.grade})",
+              f"{top_stock.change_pct:+.1f}%")
+    k4.metric("Leading Sector", best_sec, f"{sector_returns.get(best_sec, 0):+.1f}%")
+    k5.metric("Lagging Sector", worst_sec, f"{sector_returns.get(worst_sec, 0):+.1f}%")
+
+    st.divider()
+
+    left, right = st.columns([3, 1])
+    with left:
+        st.subheader("📊 All Stocks by Score (Top 30)")
+        st.plotly_chart(build_score_bar(scores), width='stretch')
+    with right:
+        if sector_returns:
+            st.subheader("🔄 Sector Rotation (1d)")
+            st.plotly_chart(build_sector_chart(sector_returns), width='stretch')
+
+    st.subheader(f"🏆 Top {top_n} Trading Opportunities")
+    df_top = make_scores_df(ranked[:top_n], extra_cols=True)
+    # re-add Rank and extra columns present in old code
+    styled = (
+        df_top.style
+        .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
+        .map(colour_chg,   subset=["Chg %"])
+    )
+    st.dataframe(styled, width='stretch', hide_index=True, height=420)
+
+    st.divider()
+    st.subheader("🔍 Stock Deep Dive")
+    choices = [
+        f"{i}. {s.ticker} — {s.name[:30]} (Score: {s.total_score:.1f})"
+        for i, s in enumerate(ranked, 1)
+    ]
+    pick  = st.selectbox("Select a stock for full analysis:", choices, key="daily_pick")
+    stock = ranked[choices.index(pick)]
+    show_stock_analysis(stock)
+
+    st.divider()
+    st.caption("⚠️ For informational purposes only. Not financial advice. Always apply your own due diligence.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Stock Search
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def show_search_tab(macro_flags):
+    st.markdown("## 🔍 Stock Search & Deep Analysis")
+    st.caption(
+        "Search **any** US or international stock by ticker symbol or company name — "
+        "not limited to the pre-built universe."
+    )
+
+    col_in, col_btn = st.columns([5, 1])
+    with col_in:
+        query = st.text_input(
+            "",
+            placeholder="e.g.  AAPL   or   Apple Inc   or   Palantir   or   BRK-B",
+            label_visibility="collapsed",
+            key="search_query",
+        )
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.button("🔍 Analyse", type="primary", use_container_width=True, key="search_btn")
+
+    if not query:
+        st.info(
+            "💡 **Tips:**\n"
+            "- Ticker symbols work best: `NVDA`, `TSLA`, `BRK-B`, `MELI`\n"
+            "- Company names also work: `Nvidia`, `Tesla`, `Berkshire`\n"
+            "- International stocks: `BABA`, `TSM`, `ASML`\n"
+            "- ETFs: `SPY`, `QQQ`, `GLD`"
+        )
+        return
+
+    with st.spinner(f"Looking up **'{query}'**…"):
+        ticker, name = resolve_ticker(query)
+
+    if not ticker:
+        st.error(
+            f"❌ No stock found for **'{query}'**. "
+            "Try the ticker symbol directly (e.g. `AAPL`) or check the spelling."
+        )
+        return
+
+    st.success(f"✅ Found: **{ticker}** — {name}")
+    st.divider()
+
+    with st.spinner(f"Running full multi-factor analysis for **{ticker}**…"):
+        stock = analyse_single_ticker(ticker, macro_flags)
+
+    if not stock:
+        st.warning("⚠️ Analysis unavailable — insufficient market data for this ticker.")
+        return
+
+    show_stock_analysis(stock)
+    st.divider()
+    st.caption("⚠️ For informational purposes only. Not financial advice.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Sector Browser
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def show_sector_browser(macro_flags):
+    st.markdown("## 🏭 Sector Browser — 20 Stocks per Sector")
+    st.caption(
+        "Instantly compare and rank the 20 leading stocks in any market sector. "
+        "Scores cached for 30 min — click **Refresh Data** in the sidebar to force reload."
+    )
+
+    sectors       = list(SECTOR_STOCKS.keys())
+    sector_labels = [f"{SECTOR_ICONS.get(s, '📊')} {s}" for s in sectors]
+
+    sel_label = st.radio(
+        "Sector:",
+        sector_labels,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="sector_radio",
+    )
+    selected_sector = sectors[sector_labels.index(sel_label)]
+    sector_tickers  = tuple(SECTOR_STOCKS[selected_sector])
+    icon            = SECTOR_ICONS.get(selected_sector, "📊")
+
+    # ── Sector ETF quick stat ─────────────────────────────────────────────────
+    etf = SECTOR_ETFS.get(selected_sector)
+    if etf:
+        etf_q   = get_batch_quotes((etf,))
+        etf_d   = etf_q.get(etf, {})
+        etf_chg = etf_d.get("change_pct", 0)
+        etf_px  = etf_d.get("price", 0)
+        st.metric(
+            f"{icon} {selected_sector} ETF ({etf})",
+            f"${etf_px:,.2f}",
+            f"{etf_chg:+.2f}%",
+            delta_color="normal" if etf_chg >= 0 else "inverse",
+        )
+
+    st.divider()
+
+    # ── Run analysis ──────────────────────────────────────────────────────────
+    with st.spinner(
+        f"Analysing {len(sector_tickers)} {selected_sector} stocks… "
+        "(cached — fast after first load)"
+    ):
+        sector_scores = run_full_analysis(sector_tickers, macro_flags)
+
+    if not sector_scores:
+        st.error("No data returned. Check your connection.")
+        return
+
+    ranked_sector = sorted(sector_scores, key=lambda s: s.total_score, reverse=True)
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    avg_score = sum(s.total_score for s in sector_scores) / len(sector_scores)
+    top_s     = ranked_sector[0]
+    bot_s     = ranked_sector[-1]
+    bullish   = sum(1 for s in sector_scores if s.total_score >= 60)
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Stocks Analysed",     len(sector_scores))
+    k2.metric("Sector Avg Score",    f"{avg_score:.1f}")
+    k3.metric(f"Best:  {top_s.ticker}",
+              f"{top_s.total_score:.1f} ({top_s.grade})", f"{top_s.change_pct:+.1f}%")
+    k4.metric(f"Worst: {bot_s.ticker}",
+              f"{bot_s.total_score:.1f} ({bot_s.grade})", f"{bot_s.change_pct:+.1f}%")
+    k5.metric("Bullish (≥ 60)",      f"{bullish} / {len(sector_scores)}")
+
+    st.divider()
+
+    # ── Score comparison bar chart ────────────────────────────────────────────
+    st.subheader(f"📊 {icon} {selected_sector} — Score Comparison")
+    st.plotly_chart(build_score_bar(sector_scores, height=320), width='stretch')
+
+    st.divider()
+
+    # ── Full comparison table ─────────────────────────────────────────────────
+    st.subheader(f"📋 {selected_sector} — All {len(ranked_sector)} Stocks Ranked by Score")
+
+    df_sector = make_scores_df(ranked_sector)
+    styled = (
+        df_sector.style
+        .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
+        .map(colour_chg,   subset=["Chg %"])
+    )
+    st.dataframe(styled, width='stretch', hide_index=True, height=500)
+
+    st.divider()
+
+    # ── Deep-dive within sector ───────────────────────────────────────────────
+    st.subheader(f"🔍 {selected_sector} — Deep Dive")
+    choices = [
+        f"{i}. {s.ticker} — {s.name[:30]} (Score: {s.total_score:.1f})"
+        for i, s in enumerate(ranked_sector, 1)
+    ]
+    pick  = st.selectbox(
+        "Pick a stock for the full analysis:",
+        choices,
+        key=f"sector_pick_{selected_sector}",
+    )
+    show_stock_analysis(ranked_sector[choices.index(pick)])
+    st.divider()
+    st.caption("⚠️ For informational purposes only. Not financial advice.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main entry point
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    # ── Sidebar ──────────────────────────────────────────────────────────────
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.title("⚙️ Settings")
         st.caption(f"Last refresh: {datetime.now().strftime('%H:%M:%S')}")
 
         universe_choice = st.selectbox(
-            "Stock Universe",
+            "Stock Universe (Daily Top Picks tab)",
             ["Full Universe (~100)", "DJIA (30)", "NASDAQ Top (33)", "S&P500 Top (40)", "Custom"],
         )
         if universe_choice == "Full Universe (~100)":
@@ -328,7 +721,7 @@ def main():
         elif universe_choice == "S&P500 Top (40)":
             tickers = SP500_TOP
         else:
-            custom = st.text_input("Tickers (comma-separated)", "AAPL,NVDA,MSFT,GOOGL,META,AMZN")
+            custom  = st.text_input("Tickers (comma-separated)", "AAPL,NVDA,MSFT,GOOGL,META,AMZN")
             tickers = [t.strip().upper() for t in custom.split(",") if t.strip()]
 
         top_n = st.slider("Top N stocks to show", 5, 20, 10)
@@ -336,10 +729,10 @@ def main():
         st.divider()
         st.subheader("📡 Macro Regime Flags")
         fed_hawkish     = st.toggle("Fed Hawkish (rate hike mode)", False)
-        recession_risk  = st.toggle("Recession Risk", False)
-        strong_dollar   = st.toggle("Strong USD", False)
-        earnings_season = st.toggle("Earnings Season", True)
-        geo_risk        = st.toggle("Geopolitical Risk", False)
+        recession_risk  = st.toggle("Recession Risk",               False)
+        strong_dollar   = st.toggle("Strong USD",                   False)
+        earnings_season = st.toggle("Earnings Season",              True)
+        geo_risk        = st.toggle("Geopolitical Risk",            False)
 
         macro_flags = (
             ("fed_hawkish",       fed_hawkish),
@@ -350,193 +743,39 @@ def main():
         )
 
         st.divider()
-        refresh = st.button("🔄 Refresh Data", width='stretch')
-        if refresh:
+        if st.button("🔄 Refresh Data", width='stretch'):
             st.cache_data.clear()
             st.rerun()
-
-        st.caption("Data cached for 30 min. Click Refresh to force reload.")
+        st.caption("Data cached 30 min · Fundamentals 4 hr")
 
     # ── Header ────────────────────────────────────────────────────────────────
     col_title, col_date = st.columns([3, 1])
     with col_title:
         st.title("📈 US Stock Daily Analyzer")
-        st.caption("DJIA · NASDAQ-100 · S&P500 — Multi-factor scoring: Technical 38% | Fundamental 30% | Sentiment 18% | Macro 14%")
+        st.caption(
+            "DJIA · NASDAQ-100 · S&P500 — "
+            "Multi-factor scoring: Technical 38% | Fundamental 30% | Sentiment 18% | Macro 14%"
+        )
     with col_date:
         st.metric("Today", datetime.now().strftime("%b %d, %Y"))
 
     st.divider()
 
-    # ── Run analysis ──────────────────────────────────────────────────────────
-    with st.spinner(f"Analysing {len(tickers)} stocks… (cached after first run)"):
-        scores = run_full_analysis(tuple(tickers), macro_flags)
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tab1, tab2, tab3 = st.tabs([
+        "📈 Daily Top Picks",
+        "🔍 Stock Search",
+        "🏭 Sector Browser",
+    ])
 
-    if not scores:
-        st.error("No data returned. Check your internet connection.")
-        return
+    with tab1:
+        show_daily_tab(tickers, top_n, macro_flags)
 
-    ranked = rank_stocks(scores, top_n)
+    with tab2:
+        show_search_tab(macro_flags)
 
-    # ── Top KPI row ───────────────────────────────────────────────────────────
-    sector_returns = get_sector_returns()
-    best_sec  = max(sector_returns, key=sector_returns.get) if sector_returns else "—"
-    worst_sec = min(sector_returns, key=sector_returns.get) if sector_returns else "—"
-    best_ret  = sector_returns.get(best_sec, 0)
-    worst_ret = sector_returns.get(worst_sec, 0)
-    avg_score = sum(s.total_score for s in scores) / len(scores)
-    top_stock = ranked[0]
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Stocks Analysed", len(scores))
-    k2.metric("Universe Avg Score", f"{avg_score:.1f}")
-    k3.metric(f"#1 Pick: {top_stock.ticker}", f"{top_stock.total_score:.1f} ({top_stock.grade})",
-              f"{top_stock.change_pct:+.1f}%")
-    k4.metric("Leading Sector", best_sec, f"{best_ret:+.1f}%")
-    k5.metric("Lagging Sector", worst_sec, f"{worst_ret:+.1f}%")
-
-    st.divider()
-
-    # ── Score chart + Sector rotation ─────────────────────────────────────────
-    left, right = st.columns([3, 1])
-    with left:
-        st.subheader("📊 All Stocks by Score (Top 30)")
-        st.plotly_chart(build_score_bar(scores), width='stretch')
-    with right:
-        if sector_returns:
-            st.subheader("🔄 Sector Rotation (1d)")
-            st.plotly_chart(build_sector_chart(sector_returns), width='stretch')
-
-    # ── Top N ranked table ────────────────────────────────────────────────────
-    st.subheader(f"🏆 Top {top_n} Trading Opportunities")
-
-    table_rows = []
-    for i, s in enumerate(ranked, 1):
-        tfs = " | ".join(s.timeframes)
-        row = {
-            "Rank": i,
-            "Ticker": s.ticker,
-            "Name": s.name[:28],
-            "Price": f"${s.price:,.2f}",
-            "Chg %": f"{s.change_pct:+.2f}%",
-            "Score": s.total_score,
-            "Grade": s.grade,
-            "Tech": round(s.tech_score, 0),
-            "Fund": round(s.fund_score, 0),
-            "Sent": round(s.sent_score, 0),
-            "Macro": round(s.macro_score, 0),
-            "Timeframes": tfs,
-            "Entry $": f"${s.entry:,.2f}",
-            "Stop $": f"${s.stop_loss:,.2f}",
-            "T1 $": f"${s.target_1:,.2f}",
-            "T2 $": f"${s.target_2:,.2f}",
-            "R:R": f"{s.risk_reward}x",
-            "Sector": s.sector,
-        }
-        table_rows.append(row)
-
-    df_table = pd.DataFrame(table_rows)
-
-    def colour_score(val):
-        try:
-            v = float(val)
-            if v >= 72: return "color: #00ff88; font-weight: bold"
-            if v >= 60: return "color: #ffd700; font-weight: bold"
-            if v >= 48: return "color: #ff8c00"
-            return "color: #ff4444"
-        except Exception:
-            return ""
-
-    def colour_chg(val):
-        try:
-            v = float(str(val).replace("%",""))
-            return "color: #00ff88" if v >= 0 else "color: #ff4444"
-        except Exception:
-            return ""
-
-    styled = (
-        df_table.style
-        .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
-        .map(colour_chg, subset=["Chg %"])
-    )
-    st.dataframe(styled, width='stretch', hide_index=True, height=420)
-
-    st.divider()
-
-    # ── Per-stock detail ──────────────────────────────────────────────────────
-    st.subheader("🔍 Stock Deep Dive")
-    ticker_choices = [f"{i}. {s.ticker} — {s.name[:30]} (Score: {s.total_score:.1f})"
-                      for i, s in enumerate(ranked, 1)]
-    selected_label = st.selectbox("Select a stock for full analysis:", ticker_choices)
-    selected_idx   = ticker_choices.index(selected_label)
-    stock          = ranked[selected_idx]
-
-    # ── Detail layout ─────────────────────────────────────────────────────────
-    d_left, d_right = st.columns([2, 1])
-
-    with d_left:
-        df_chart = get_price_history(stock.ticker, "6mo")
-        if not df_chart.empty:
-            st.plotly_chart(build_price_chart(stock.ticker, df_chart), width='stretch')
-            st.plotly_chart(build_rsi_chart(stock.ticker, df_chart), width='stretch')
-
-    with d_right:
-        # Score radar
-        st.plotly_chart(build_radar(stock), width='stretch')
-
-        # Key metrics
-        st.markdown(f"### {stock.ticker} — {stock.grade}")
-        ind = stock.indicators
-        m   = st.columns(2)
-        m[0].metric("Price", f"${stock.price:,.2f}", f"{stock.change_pct:+.2f}%")
-        m[1].metric("Score", f"{stock.total_score:.1f}", stock.grade)
-
-        st.markdown(f"**Sector:** {stock.sector}  |  **Beta:** {stock.beta:.2f}  |  **ATR:** ${stock.atr:.2f} ({stock.atr_pct:.1f}%)")
-
-        st.markdown("**Timeframes:**")
-        st.markdown(tf_badges_html(stock), unsafe_allow_html=True)
-
-    # Trade levels row
-    st.markdown("#### 📐 Trade Levels")
-    l1, l2, l3, l4, l5 = st.columns(5)
-    l1.metric("Entry",      f"${stock.entry:,.2f}")
-    l2.metric("Stop Loss",  f"${stock.stop_loss:,.2f}", f"-{(stock.entry-stock.stop_loss)/stock.entry*100:.1f}%")
-    l3.metric("Target 1",   f"${stock.target_1:,.2f}", f"+{(stock.target_1-stock.entry)/stock.entry*100:.1f}%")
-    l4.metric("Target 2",   f"${stock.target_2:,.2f}", f"+{(stock.target_2-stock.entry)/stock.entry*100:.1f}%")
-    l5.metric("Risk:Reward", f"{stock.risk_reward}x")
-
-    # Technical indicators grid
-    st.markdown("#### 📡 Technical Indicators")
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.columns(8)
-    t1.metric("RSI (14)",    ind.get("rsi", "—"))
-    t2.metric("ADX",         ind.get("adx", "—"))
-    t3.metric("Stoch K",     ind.get("stoch_k", "—"))
-    t4.metric("Vol Ratio",   f"{ind.get('vol_ratio','—')}x")
-    t5.metric("EMA 50",      f"${ind.get('ema50','—')}")
-    t6.metric("EMA 200",     f"${ind.get('ema200','—')}")
-    t7.metric("ROC 5d",      f"{ind.get('roc5','—')}%")
-    t8.metric("ROC 20d",     f"{ind.get('roc20','—')}%")
-
-    # Fundamentals
-    fm = stock.fund_metrics
-    if fm:
-        st.markdown("#### 💼 Fundamentals")
-        f1, f2, f3, f4, f5, f6 = st.columns(6)
-        f1.metric("P/E Ratio",   fm.get("pe", "—"))
-        f2.metric("PEG Ratio",   fm.get("peg", "—"))
-        f3.metric("ROE",         fm.get("roe", "—"))
-        f4.metric("Rev Growth",  fm.get("revenue_growth", "—"))
-        f5.metric("EPS Growth",  fm.get("earnings_growth", "—"))
-        f6.metric("Mkt Cap",     f"${fm.get('market_cap_b','—')}B")
-
-    # Signals
-    if stock.signals:
-        st.markdown("#### 🚦 Signals & Catalysts")
-        sig_cols = st.columns(2)
-        for i, sig in enumerate(stock.signals[:10]):
-            sig_cols[i % 2].markdown(f"• {sig}")
-
-    st.divider()
-    st.caption("⚠️ For informational purposes only. Not financial advice. Always apply your own due diligence.")
+    with tab3:
+        show_sector_browser(macro_flags)
 
 
 if __name__ == "__main__":
