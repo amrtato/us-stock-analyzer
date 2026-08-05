@@ -259,7 +259,13 @@ def analyse_fundamental(ticker: str, fund: dict, current_price: float = 0) -> di
         labels = {1: "Strong Buy", 2: "Buy", 3: "Hold", 4: "Underperform", 5: "Sell"}
         label  = labels.get(round(rec), f"{rec:.1f}")
         n      = int(_safe(fund.get("analyst_count")))
-        signals.append(f"Analyst consensus: {label} ({n} analysts)")
+        # `recommendation` is derived from mean price-target upside, not from a
+        # poll of analysts, so it can be present when the analyst count is zero.
+        # Reporting "Buy (0 analysts)" asserted a consensus from no inputs.
+        if n > 0:
+            signals.append(f"Analyst consensus: {label} ({n} analysts)")
+        else:
+            signals.append(f"Price-target implied: {label} (no analyst count available)")
 
     return {
         "score":    round(composite, 2),

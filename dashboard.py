@@ -2,7 +2,7 @@
 US Stock Analyzer — Streamlit Dashboard
 
 Tabs:
-  1. Daily Top Picks  — ranked top-N from the selected universe
+  1. Daily Rankings   — ranked top-N from the selected universe
   2. Stock Search     — analyse any ticker or company name on demand
   3. Sector Browser   — compare top 20 stocks in each market sector
 
@@ -10,9 +10,11 @@ Launch:
     streamlit run dashboard.py
 """
 import os
+import re
 import sys
 import json
 import time
+import uuid
 import warnings
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,7 +32,7 @@ import yfinance as yf
 
 from config import (
     ALL_STOCKS, DJIA_STOCKS, NASDAQ_TOP, SP500_TOP,
-    SECTOR_MAP, SECTOR_STOCKS,
+    SECTOR_STOCKS,
 )
 from data.fetcher import fetch_price_history, fetch_fundamentals, fetch_batch_quotes, prefetch_price_histories
 from data.news_fetcher import fetch_rss_news, aggregate_ticker_news
@@ -212,13 +214,32 @@ def _mark_loaded(cache_key: str) -> None:
 # ── Watch List file persistence ────────────────────────────────────────────────
 # Stored in the user's home directory so it survives Azure zip-deploys.
 # In Azure App Service the /home directory is on Azure Files and IS persistent.
-_WATCHLIST_FILE = os.path.join(os.path.expanduser("~"), ".us_stock_watchlist.json")
+# A single shared path here meant every visitor to the deployed app read and
+# wrote ONE watch list — open the site in a second browser and you saw (and
+# could delete) someone else's stocks. Streamlit has no user auth, so scope the
+# file by a per-browser id carried in the URL query string: it survives reloads
+# for that browser, and no two visitors collide.
+_WATCHLIST_DIR = os.path.join(os.path.expanduser("~"), ".us_stock_watchlists")
+
+
+def _watchlist_id() -> str:
+    """Stable per-browser id, persisted in the URL so reloads keep the list."""
+    wid = st.query_params.get("wl")
+    if not wid or not re.fullmatch(r"[A-Za-z0-9]{8,32}", str(wid)):
+        wid = uuid.uuid4().hex[:16]
+        st.query_params["wl"] = wid
+    return str(wid)
+
+
+def _watchlist_path() -> str:
+    os.makedirs(_WATCHLIST_DIR, exist_ok=True)
+    return os.path.join(_WATCHLIST_DIR, f"{_watchlist_id()}.json")
 
 
 def _load_watchlist_file() -> list:
-    """Return persisted watch-list tickers. Returns [] if file is absent/invalid."""
+    """Return this browser's persisted tickers. [] if absent/invalid."""
     try:
-        with open(_WATCHLIST_FILE) as f:
+        with open(_watchlist_path()) as f:
             data = json.load(f)
         if isinstance(data, list):
             return [str(t).upper().strip() for t in data if str(t).strip()]
@@ -228,9 +249,9 @@ def _load_watchlist_file() -> list:
 
 
 def _save_watchlist_file(tickers: list) -> None:
-    """Write watch-list tickers to disk (survives page refreshes and restarts)."""
+    """Write this browser's tickers to disk (survives page refreshes)."""
     try:
-        with open(_WATCHLIST_FILE, "w") as f:
+        with open(_watchlist_path(), "w") as f:
             json.dump([str(t).upper() for t in tickers], f)
     except Exception as exc:
         logging.warning("watchlist save failed: %s", exc)
@@ -332,11 +353,14 @@ def resolve_ticker(query: str):
         fi    = t.fast_info
         price = fi.last_price
         if price and float(price) > 0:
+            # basic_info has no long_name (it is a fast_info shim), so this
+            # always fell through to the bare symbol — which is why searching
+            # "Palantir" returned "Palantir Technologies Inc." but searching
+            # "TSLA" returned "TSLA — TSLA". .info carries the real name.
             name = upper
             try:
-                bi = t.basic_info
-                if bi:
-                    name = getattr(bi, "long_name", upper) or upper
+                info = t.info or {}
+                name = info.get("longName") or info.get("shortName") or upper
             except Exception:
                 pass
             return upper, name
@@ -622,9 +646,12 @@ def show_stock_analysis(stock: StockScore, context: str = "main"):
         m   = st.columns(2)
         m[0].metric("Price", f"${stock.price:,.2f}", f"{stock.change_pct:+.2f}%")
         m[1].metric("Score", f"{stock.total_score:.1f}", stock.grade)
+        # Beta is genuinely absent for some tickers — show "—" rather than the
+        # old hardcoded 1.00, which looked like a real market-neutral reading.
+        beta_txt = f"{stock.beta:.2f}" if stock.beta is not None else "—"
         st.markdown(
             f"**Sector:** {stock.sector}  |  "
-            f"**Beta:** {stock.beta:.2f}  |  "
+            f"**Beta:** {beta_txt}  |  "
             f"**ATR:** ${stock.atr:.2f} ({stock.atr_pct:.1f}%)"
         )
         st.markdown("**Timeframes:**")
@@ -699,10 +726,13 @@ def make_scores_df(scores: list, extra_cols: bool = False) -> pd.DataFrame:
             "Risk":    f"{s.risk_emoji} {s.risk_rating}",
             "Score":   round(s.total_score, 1),
             "Grade":   s.grade,
-            "Tech":    round(s.tech_score,  0),
-            "Fund":    round(s.fund_score,  0),
-            "Sent":    round(s.sent_score,  0),
-            "Macro":   round(s.macro_score, 0),
+            # These were floats rounded to 0dp, which pandas still renders as
+            # "59.000000" in the grid. They are whole numbers — store them as
+            # ints so they display as "59".
+            "Tech":    int(round(s.tech_score)),
+            "Fund":    int(round(s.fund_score)),
+            "Sent":    int(round(s.sent_score)),
+            "Macro":   int(round(s.macro_score)),
             "TFs":     " | ".join(s.timeframes),
             "Entry":   f"${s.entry:,.2f}",
             "Entry Zone": (
@@ -721,7 +751,7 @@ def make_scores_df(scores: list, extra_cols: bool = False) -> pd.DataFrame:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Daily Top Picks
+# TAB 1 — Daily Rankings
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def show_daily_tab(tickers, top_n, macro_flags):
@@ -754,7 +784,10 @@ def show_daily_tab(tickers, top_n, macro_flags):
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Stocks Analysed",    len(scores))
     k2.metric("Universe Avg Score", f"{avg_score:.1f}")
-    k3.metric(f"#1 Pick: {top_stock.ticker}",
+    # "#1 Pick" claimed a recommendation. Walk-forward testing over 5 years found
+    # the composite has no stable rank correlation with forward returns, so the
+    # honest label is what this actually is: the highest-scoring name today.
+    k3.metric(f"Highest Score: {top_stock.ticker}",
               f"{top_stock.total_score:.1f} ({top_stock.grade})",
               f"{top_stock.change_pct:+.1f}%")
     k4.metric("Leading Sector", best_sec, f"{sector_returns.get(best_sec, 0):+.1f}%")
@@ -771,12 +804,19 @@ def show_daily_tab(tickers, top_n, macro_flags):
             st.subheader("🔄 Sector Rotation (1d)")
             st.plotly_chart(build_sector_chart(sector_returns), use_container_width=True, key="sector_rot_daily")
 
-    st.subheader(f"🏆 Top {top_n} Trading Opportunities")
+    st.subheader(f"📊 Top {top_n} by Composite Score")
+    st.caption(
+        "A screening rank, not a forecast. Walk-forward testing (101 stocks, "
+        "2022–2026, non-overlapping windows) found no reliable relationship "
+        "between this score and forward returns — use it to shortlist names "
+        "for your own analysis, not as a buy list."
+    )
     df_top = make_scores_df(ranked[:top_n], extra_cols=True)
     styled = (
         df_top.style
         .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
         .map(colour_chg,   subset=["Chg %"])
+        .format({"Score": "{:.1f}"})
     )
     st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
 
@@ -925,9 +965,10 @@ def show_sector_browser(macro_flags):
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Stocks Analysed",     len(sector_scores))
     k2.metric("Sector Avg Score",    f"{avg_score:.1f}")
-    k3.metric(f"Best:  {top_s.ticker}",
+    # "Best"/"Worst" read as verdicts; these are simply the score extremes.
+    k3.metric(f"Highest: {top_s.ticker}",
               f"{top_s.total_score:.1f} ({top_s.grade})", f"{top_s.change_pct:+.1f}%")
-    k4.metric(f"Worst: {bot_s.ticker}",
+    k4.metric(f"Lowest:  {bot_s.ticker}",
               f"{bot_s.total_score:.1f} ({bot_s.grade})", f"{bot_s.change_pct:+.1f}%")
     k5.metric("Bullish (≥ 60)",      f"{bullish} / {len(sector_scores)}")
 
@@ -950,6 +991,7 @@ def show_sector_browser(macro_flags):
         df_sector.style
         .map(colour_score, subset=["Score", "Tech", "Fund", "Sent", "Macro"])
         .map(colour_chg,   subset=["Chg %"])
+        .format({"Score": "{:.1f}"})
     )
     st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
 
@@ -988,19 +1030,24 @@ def show_watchlist_tab(macro_flags: tuple):
     watchlist: list = st.session_state["watchlist"]
 
     # ── Add stock ──────────────────────────────────────────────────────────────
-    add_col, btn_col = st.columns([5, 1])
-    with add_col:
-        new_q = st.text_input(
-            "",
-            placeholder="Ticker or company name — e.g. NVDA  ·  Palantir  ·  BRK-B",
-            label_visibility="collapsed",
-            key="wl_input",
-        )
-    with btn_col:
-        st.markdown("<br>", unsafe_allow_html=True)
-        add_clicked = st.button(
-            "➕ Add", type="primary", use_container_width=True, key="wl_add"
-        )
+    # A form with clear_on_submit is the only legal way to empty this box:
+    # assigning st.session_state["wl_input"] after the widget exists raises
+    # StreamlitAPIException. Without the clear, the previous ticker stayed in
+    # the field and the next entry was appended to it ("NVDA" + "Berkshire"
+    # → "NVDABerkshire"), so every user's second add failed.
+    with st.form("wl_add_form", clear_on_submit=True, border=False):
+        add_col, btn_col = st.columns([5, 1])
+        with add_col:
+            new_q = st.text_input(
+                "Add to watch list",
+                placeholder="Ticker or company name — e.g. NVDA  ·  Palantir  ·  BRK-B",
+                label_visibility="collapsed",
+                key="wl_input",
+            )
+        with btn_col:
+            add_clicked = st.form_submit_button(
+                "➕ Add", type="primary", use_container_width=True
+            )
 
     if add_clicked and new_q.strip():
         with st.spinner(f"Looking up '{new_q.strip()}'…"):
@@ -1218,6 +1265,7 @@ def show_watchlist_tab(macro_flags: tuple):
         df_wl.style
         .map(colour_score, subset=["Score", "Tech", "Fund"])
         .map(colour_chg,   subset=["Chg %"])
+        .format({"Score": "{:.1f}"})
     )
     st.dataframe(styled, use_container_width=True, hide_index=True,
                  height=min(600, 60 + len(rows) * 38))
@@ -1256,7 +1304,7 @@ def main():
         st.caption(f"Last refresh: {datetime.now().strftime('%H:%M:%S')}")
 
         universe_choice = st.selectbox(
-            "Stock Universe (Daily Top Picks tab)",
+            "Stock Universe (Daily Rankings tab)",
             ["Full Universe (~100)", "DJIA (30)", "NASDAQ Top (33)", "S&P500 Top (40)", "Custom"],
         )
         if universe_choice == "Full Universe (~100)":
@@ -1310,7 +1358,7 @@ def main():
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
     tab1, tab2, tab3, tab4 = st.tabs([
-        "📈 Daily Top Picks",
+        "📈 Daily Rankings",
         "🔍 Stock Search",
         "🏭 Sector Browser",
         "📋 Watch List",

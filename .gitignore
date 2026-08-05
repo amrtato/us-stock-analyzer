@@ -32,3 +32,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# backtest artefacts
+.scored_cache.csv
+.panel5y.csv
+
+# local dev launch config (machine-specific paths)
+.claude/

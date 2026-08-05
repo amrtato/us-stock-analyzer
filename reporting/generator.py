@@ -53,7 +53,7 @@ def print_terminal_report(ranked: list[StockScore], date_str: str) -> None:
     console.print()
 
     table = Table(
-        title="[bold]Top 10 Trading Opportunities[/bold]",
+        title="[bold]Top 10 by Composite Score[/bold]",
         box=box.DOUBLE_EDGE,
         show_lines=True,
         highlight=True,
@@ -109,7 +109,8 @@ def _print_stock_card(rank: int, stock: StockScore) -> None:
     lines = [
         f"[bold]{rank}. {stock.ticker}[/bold] — {stock.name}",
         f"  Price: [bold]${stock.price:,.2f}[/bold]  ({stock.change_pct:+.2f}%)  "
-        f"Beta: {stock.beta:.2f}  ATR: ${stock.atr:.2f} ({stock.atr_pct:.1f}%)",
+        f"Beta: {f'{stock.beta:.2f}' if stock.beta is not None else '—'}  "
+        f"ATR: ${stock.atr:.2f} ({stock.atr_pct:.1f}%)",
         "",
         f"  [bold]Levels:[/bold]  Entry: ${stock.entry:,.2f}  "
         f"Stop: ${stock.stop_loss:,.2f}  "
@@ -181,7 +182,9 @@ def save_markdown_report(
             "",
         ]
 
-    lines += ["## Top 10 Trading Opportunities", ""]
+    lines += ["## Top 10 by Composite Score", "",
+              "_A screening rank, not a forecast — the composite has no "
+              "demonstrated relationship with forward returns._", ""]
 
     # Summary table
     lines += [
@@ -209,7 +212,8 @@ def save_markdown_report(
             f"Sent: {s.sent_score:.0f} | Macro: {s.macro_score:.0f}",
             "",
             f"**Price:** ${s.price:,.2f} ({s.change_pct:+.2f}%) | "
-            f"**Beta:** {s.beta:.2f} | **ATR:** ${s.atr:.2f} ({s.atr_pct:.1f}%)",
+            f"**Beta:** {f'{s.beta:.2f}' if s.beta is not None else '—'} | "
+            f"**ATR:** ${s.atr:.2f} ({s.atr_pct:.1f}%)",
             "",
             "### Trade Levels",
             f"| Entry | Stop Loss | Target 1 | Target 2 | Risk:Reward |",
@@ -293,13 +297,20 @@ Based on the following algorithmic stock scores and signals, write a concise mar
 TOP 10 STOCKS TODAY:
 {chr(10).join(stock_lines)}
 
+The composite score is a SCREENING RANK. Walk-forward testing (101 stocks,
+2022-2026, non-overlapping windows) found no reliable relationship between it
+and forward returns. Describe what the indicators currently show; do not imply
+these are predictions or recommendations, and do not invent a rationale for why
+a stock will rise.
+
 Write a 350-450 word narrative covering:
 1. **Market Context** (2-3 sentences on macro/sector rotation backdrop)
-2. **Top Picks Rationale** — highlight 3-4 standout stocks with specific reasons
-3. **Risk Factors** — key risks traders should watch today
+2. **What Stands Out** — 3-4 stocks whose indicator readings are notable, and why
+3. **Risk Factors** — key risks worth watching today
 4. **Timeframe Summary** — which stocks suit scalping vs swing vs longer-term
 
-Be specific, data-driven, and actionable. Use plain text with markdown headers."""
+Be specific and data-driven. Describe, don't predict. Use plain text with
+markdown headers."""
 
         message = client.messages.create(
             model=CLAUDE_MODEL,

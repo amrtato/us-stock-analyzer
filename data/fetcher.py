@@ -23,6 +23,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
+from config import normalize_sector
+
 log = logging.getLogger(__name__)
 
 # ── Semaphore: fully serialise yfinance .info-class calls ─────────────────────
@@ -429,21 +431,39 @@ def fetch_fundamentals(ticker: str) -> dict:
             except Exception as exc:
                 log.debug("Analyst targets failed for %s: %s", ticker, exc)
 
-            # ── 5. Company metadata from fast_info extras ─────────────────────
+            # ── 5. Company metadata ───────────────────────────────────────────
+            # fast_info.quote_type is the *instrument* type ("EQUITY"), NOT the
+            # GICS sector — reading it as one made every stock report
+            # sector="EQUITY", which silently disabled the sector-rotation
+            # sub-score, the per-sector P/E benchmark, and the recession /
+            # geopolitical macro flags. basic_info has no sector or long_name
+            # either (it is a fast_info shim), so both fell through to defaults.
+            # .info is the only source that carries them; it is a heavier call
+            # but this whole function is cached per ticker for FUND_CACHE_HRS.
             result.update({
-                "sector":       getattr(fi, "quote_type", "Unknown"),
-                "industry":     "Unknown",
-                "company_name": ticker,
+                "sector":        "Unknown",
+                "industry":      "Unknown",
+                "company_name":  ticker,
+                "beta":          None,
+                "analyst_count": 0,
             })
-            # Try richer name from basic_info (lightweight, usually works)
             try:
-                bi = t.basic_info
-                if bi:
-                    result["company_name"] = getattr(bi, "long_name", ticker) or ticker
-                    result["sector"]       = getattr(bi, "sector", result["sector"]) or result["sector"]
-                    result["industry"]     = getattr(bi, "industry", "Unknown") or "Unknown"
-            except Exception:
-                pass
+                info = t.info or {}
+                result["company_name"] = (
+                    info.get("longName") or info.get("shortName") or ticker
+                )
+                result["sector"]   = normalize_sector(info.get("sector"))
+                result["industry"] = info.get("industry") or "Unknown"
+                # beta was never populated, so every stock scored the neutral
+                # default and displayed a fabricated "1.00".
+                result["beta"]     = _safe(info.get("beta"))
+                # analyst_count is consumed by score_analyst_consensus() but was
+                # never set, producing "Analyst consensus: Buy (0 analysts)".
+                result["analyst_count"] = _safe(
+                    info.get("numberOfAnalystOpinions"), 0
+                ) or 0
+            except Exception as exc:
+                log.debug("Company info failed for %s: %s", ticker, exc)
 
             # Remove internal scratch keys
             result.pop("_revenue",   None)

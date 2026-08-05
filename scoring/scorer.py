@@ -15,6 +15,10 @@ from config import WEIGHTS
 
 log = logging.getLogger(__name__)
 
+# How far below spot an RSI-overbought "wait for the pullback" entry anchor is
+# allowed to sit. Beyond this the levels stop describing a tradeable setup.
+MAX_PULLBACK_DEPTH = 0.06   # 6%
+
 
 @dataclass
 class StockScore:
@@ -41,7 +45,7 @@ class StockScore:
     # Risk metrics
     atr:     float = 0.0
     atr_pct: float = 0.0
-    beta:    float = 1.0
+    beta:    Optional[float] = None   # None = not reported by the data source
 
     # Signals and context
     signals:      list   = field(default_factory=list)
@@ -57,6 +61,10 @@ class StockScore:
     target_1:       float = 0.0
     target_2:       float = 0.0
     risk_reward:    float = 0.0
+    # True when the RSI-overbought pullback anchor had to be clamped because
+    # price has run far above its EMAs — the levels describe a hypothetical
+    # pullback, not a setup that is tradeable at the current price.
+    entry_is_deep_pullback: bool = False
 
     # Market classification (computed)
     market_status: str = "Neutral"   # Strong Bullish / Bullish / Neutral / Bearish / Strong Bearish
@@ -99,6 +107,12 @@ class StockScore:
         ema200 = ind.get("ema200",   price)
         bb_lo  = ind.get("bb_lower", price - 2 * atr)
         bb_up  = ind.get("bb_upper", price + 2 * atr)
+        # 52-week high is a resistance candidate for T1. It lives on the
+        # fundamentals dict, which may not be populated yet — treat as optional.
+        try:
+            high52 = float(self.fund_metrics.get("52w_high") or 0) or None
+        except (TypeError, ValueError):
+            high52 = None
 
         # Collect EMA/BB levels below current price (potential supports)
         supports_below = sorted(
@@ -109,8 +123,16 @@ class StockScore:
 
         # ── Entry zone ────────────────────────────────────────────────────────
         if rsi > 68:
-            # Overbought — recommend waiting for pullback to EMA21/EMA9
+            # Overbought — recommend waiting for pullback to EMA21/EMA9.
             pullback = min(ema21, ema9) if ema21 < price and ema9 < price else nearest_support
+            # Guard: when price has run far above the EMAs (a parabolic move is
+            # exactly when RSI > 68), an unclamped anchor produces an entry
+            # 20%+ below spot, and every level derived from it — stop, T1, T2 —
+            # lands below the live price. Cap how deep the anchor may sit.
+            floor = price * (1.0 - MAX_PULLBACK_DEPTH)
+            if pullback < floor:
+                pullback = floor
+                self.entry_is_deep_pullback = True
             self.entry          = round(pullback * 1.003, 2)    # just above support
             self.entry_zone_low  = round(pullback * 0.995, 2)
             self.entry_zone_high = round(pullback * 1.012, 2)
@@ -142,11 +164,31 @@ class StockScore:
             max(self.entry * 0.91, min(self.entry * 0.99, raw_stop)), 2
         )
 
-        # ── Targets (risk-multiple based) ─────────────────────────────────────
+        # ── Targets ───────────────────────────────────────────────────────────
         risk = max(self.entry - self.stop_loss, atr * 0.5)
-        self.target_1    = round(self.entry + 2.0 * risk, 2)
-        self.target_2    = round(self.entry + 3.5 * risk, 2)
-        self.risk_reward = round((self.target_1 - self.entry) / risk, 2) if risk > 0 else 0.0
+
+        # Targets were previously entry + 2.0×risk and + 3.5×risk, which made
+        # risk_reward = (entry + 2·risk - entry)/risk ≡ 2.0 for every stock —
+        # a constant reported as if it were computed. Anchor T1 on the nearest
+        # real resistance above entry instead, and let R:R fall out of it.
+        resistance = sorted(
+            v for v in (bb_up, high52) if v and v > self.entry * 1.01
+        )
+        t1_structural = resistance[0] if resistance else None
+        t1_risk_based = self.entry + 2.0 * risk
+        # Prefer structure, but never accept a target so close it is noise.
+        if t1_structural and t1_structural >= self.entry + 0.8 * risk:
+            self.target_1 = round(t1_structural, 2)
+        else:
+            self.target_1 = round(t1_risk_based, 2)
+
+        # A target below the price you can trade at right now is not a target.
+        if self.target_1 <= price:
+            self.target_1 = round(max(price + 1.2 * risk, price * 1.02), 2)
+
+        t1_dist      = self.target_1 - self.entry
+        self.target_2 = round(self.entry + max(1.75 * t1_dist, 3.0 * risk), 2)
+        self.risk_reward = round(t1_dist / risk, 2) if risk > 0 else 0.0
 
     def compute_market_status(self) -> None:
         """
@@ -212,9 +254,10 @@ class StockScore:
         elif self.atr_pct > 2.5: risk_pts += 2
         elif self.atr_pct > 1.5: risk_pts += 1
 
-        # Beta
-        if self.beta > 2.0:   risk_pts += 2
-        elif self.beta > 1.4: risk_pts += 1
+        # Beta (unknown → contributes nothing rather than a neutral guess)
+        if self.beta is not None:
+            if self.beta > 2.0:   risk_pts += 2
+            elif self.beta > 1.4: risk_pts += 1
 
         # Poor risk:reward
         if self.risk_reward < 1.2: risk_pts += 2
@@ -312,23 +355,37 @@ class StockScore:
             lines.append(f"ADX at {adx:.0f} — weak trend; expect choppy price action.")
 
         # ── Stop & target ─────────────────────────────────────────────────────
+        # Every percentage here is measured from the *reference entry*, not from
+        # the live price. When the two differ materially that distinction is the
+        # difference between "-9%" and "-27%", so state it rather than imply it.
         stop_pct = (entry - stop) / entry * 100 if entry > 0 else 0
         t1_pct   = (t1 - entry)  / entry * 100 if entry > 0 else 0
         t2_pct   = (t2 - entry)  / entry * 100 if entry > 0 else 0
+
+        if self.entry_is_deep_pullback:
+            lines.append(
+                f"⚠️ These levels assume a pullback to ${entry:,.2f}. "
+                f"{self.ticker} currently trades at ${price:,.2f} "
+                f"({(price - entry) / entry * 100:+.1f}% above the entry), so this "
+                f"is a watch-and-wait setup — there is no entry at today's price."
+            )
+
         lines.append(
-            f"Stop Loss: ${stop:.2f}  (-{stop_pct:.1f}% from entry, "
-            f"below key support)."
+            f"Stop Loss: ${stop:.2f}  (-{stop_pct:.1f}% from the ${entry:,.2f} "
+            f"entry, below key support)."
         )
         lines.append(
-            f"Target 1: ${t1:.2f}  (+{t1_pct:.1f}%)  |  "
-            f"Target 2: ${t2:.2f}  (+{t2_pct:.1f}%)  |  "
+            f"Target 1: ${t1:.2f}  (+{t1_pct:.1f}% from entry)  |  "
+            f"Target 2: ${t2:.2f}  (+{t2_pct:.1f}% from entry)  |  "
             f"Risk:Reward: {self.risk_reward:.1f}x"
         )
 
         # ── Position sizing ────────────────────────────────────────────────────
         if self.risk_rating == "High":
             lines.append(
-                f"High volatility (ATR {self.atr_pct:.1f}% / Beta {self.beta:.2f}) — "
+                f"High volatility (ATR {self.atr_pct:.1f}%"
+                + (f" / Beta {self.beta:.2f}" if self.beta is not None else "")
+                + ") — "
                 f"limit position to 1-2% of capital. Consider a scaled entry."
             )
         elif self.risk_rating == "Medium":
@@ -406,7 +463,10 @@ def build_stock_score(
     price      = quote.get("price", 0) if quote else 0
     change_pct = quote.get("change_pct", 0) if quote else 0
     name       = fund_data.get("company_name", ticker)
-    beta       = fund_data.get("beta", 1.0) or 1.0
+    # Keep "unknown" distinguishable from "exactly 1.0" so the UI can show "—"
+    # instead of asserting a market-neutral beta the data never supplied.
+    raw_beta   = fund_data.get("beta")
+    beta       = float(raw_beta) if raw_beta not in (None, "") else None
     sector     = fund_data.get("sector", "Unknown")
 
     ind     = tech_result.get("indicators", {})

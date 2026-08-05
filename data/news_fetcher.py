@@ -103,11 +103,19 @@ def fetch_rss_news(tickers: list[str], max_per_feed: int = 30) -> dict[str, list
         if item["tickers"]:
             for t in item["tickers"]:
                 if t in result:
-                    result[t].append(item)
+                    result[t].append(dict(item, generic=False))
         else:
-            general_market.append(item)
+            general_market.append(dict(item, generic=True))
 
-    # Attach most relevant general market news to all tickers
+    # Market-wide headlines are still attached — they are useful context — but
+    # they are tagged `generic` so the sentiment scorer can exclude them.
+    #
+    # Previously they were merged in untagged, which meant that for the great
+    # majority of tickers (few headlines literally contain "MRVL") the entire
+    # 18%-weighted sentiment factor was the *same* market-wide noise applied to
+    # every stock. Worse, RSS ordering changes between polls, so the same stock
+    # scored differently on consecutive refreshes and rankings reshuffled with
+    # no market move behind it.
     for t in tickers:
         result[t].extend(general_market[:5])
 
@@ -156,18 +164,40 @@ def fetch_newsapi(tickers: list[str], api_key: str = NEWS_API_KEY) -> dict[str, 
 
 
 def aggregate_ticker_news(ticker: str, news_map: dict) -> dict:
-    """Summarise news signals for a single ticker."""
-    articles = news_map.get(ticker, [])
-    if not articles:
-        return {"count": 0, "avg_score": 0.0, "headline": "", "snippets": []}
+    """
+    Summarise news signals for a single ticker.
 
-    scores  = [a["score"] for a in articles]
+    Only headlines that actually name the ticker drive `avg_score` and `count`.
+    Market-wide items are returned separately as context so the UI can still
+    show them, but they no longer move a single stock's sentiment score — that
+    is what made every stock share one headline and made scores drift between
+    refreshes.
+    """
+    articles = news_map.get(ticker, [])
+    specific = [a for a in articles if not a.get("generic")]
+    generic  = [a for a in articles if a.get("generic")]
+
+    if not specific:
+        return {
+            "count":       0,
+            "avg_score":   0.0,
+            "headline":    "",
+            "snippets":    [],
+            "market_context": [
+                f"{a['title']} ({a['source']})" for a in generic[:3]
+            ],
+        }
+
+    scores    = [a["score"] for a in specific]
     avg_score = sum(scores) / len(scores)
-    top     = sorted(articles, key=lambda x: abs(x["score"]), reverse=True)
+    top       = sorted(specific, key=lambda x: abs(x["score"]), reverse=True)
 
     return {
-        "count":     len(articles),
+        "count":     len(specific),
         "avg_score": avg_score,
         "headline":  top[0]["title"] if top else "",
         "snippets":  [f"{a['title']} ({a['source']})" for a in top[:5]],
+        "market_context": [
+            f"{a['title']} ({a['source']})" for a in generic[:3]
+        ],
     }

@@ -19,7 +19,11 @@ def _buzz_score(article_count: int) -> float:
     if article_count >= 5:  return 65
     if article_count >= 2:  return 55
     if article_count == 1:  return 50
-    return 40  # no news = neutral/unknown
+    # Absence of ticker-specific coverage is genuinely unknown, not bearish —
+    # return true neutral. (This used to return 40 while every stock was fed
+    # market-wide headlines, so the branch was effectively unreachable; now
+    # that only real per-ticker news counts, it is the common case.)
+    return 50
 
 
 def _sentiment_to_score(avg_score: float) -> float:

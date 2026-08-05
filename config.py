@@ -58,7 +58,8 @@ SECTOR_STOCKS = {
     ],
     "Financials": [
         "JPM",  "GS",   "MS",   "BAC",  "WFC",  "USB",  "COF",  "AXP",  "V",    "MA",
-        "PYPL", "BLK",  "SPGI", "TRV",  "AFL",  "C",    "BK",   "SCHW", "ICE",  "CME",
+        # BK → BNY: BNY Mellon changed its listing ticker; BK no longer returns data.
+        "PYPL", "BLK",  "SPGI", "TRV",  "AFL",  "C",    "BNY",  "SCHW", "ICE",  "CME",
     ],
     "Healthcare": [
         "JNJ",  "UNH",  "LLY",  "MRK",  "AMGN", "GILD", "REGN", "VRTX", "ISRG", "MDT",
@@ -69,12 +70,15 @@ SECTOR_STOCKS = {
         "NOC",  "GD",   "ITW",  "ETN",  "EMR",  "CSX",  "NSC",  "FAST", "PCAR", "PAYX",
     ],
     "Energy": [
+        # HES (acquired by CVX), MRO (acquired by COP) and CTRA no longer return
+        # price data; replaced with OKE / FANG / TRGP to keep the list at 20.
         "CVX",  "XOM",  "COP",  "EOG",  "SLB",  "MPC",  "VLO",  "PSX",  "OXY",  "HAL",
-        "BKR",  "HES",  "DVN",  "MRO",  "WMB",  "KMI",  "LNG",  "APA",  "CTRA", "MTDR",
+        "BKR",  "OKE",  "DVN",  "FANG", "WMB",  "KMI",  "LNG",  "APA",  "TRGP", "MTDR",
     ],
     "Communication": [
         "GOOGL","META", "DIS",  "VZ",   "TMUS", "NFLX", "T",    "CMCSA","EA",   "TTWO",
-        "WBD",  "SPOT", "PINS", "SNAP", "RBLX", "IPG",  "OMC",  "FOXA", "LYV",  "ZM",
+        # IPG was absorbed by OMC, which is already in this list → TKO replaces it.
+        "WBD",  "SPOT", "PINS", "SNAP", "RBLX", "TKO",  "OMC",  "FOXA", "LYV",  "ZM",
     ],
     "Materials": [
         "LIN",  "APD",  "ECL",  "SHW",  "NEM",  "FCX",  "AA",   "VMC",  "MLM",  "DOW",
@@ -90,8 +94,11 @@ SECTOR_STOCKS = {
     ],
 }
 
-# Sector mapping for rotation analysis
-SECTOR_MAP = {
+# DEAD CODE — kept only until the deploy that removes it is verified.
+# Sector rotation is computed from the sector ETFs (see dashboard.get_sector_returns),
+# not from these buckets, and nothing reads SECTOR_MAP. It is also stale: it still
+# lists FISV/MRO/HES-era tickers. Do not "fix" it — delete it.
+_UNUSED_SECTOR_MAP = {
     "Technology": ["AAPL", "MSFT", "NVDA", "AMD", "INTC", "QCOM", "AVGO", "AMAT", "LRCX",
                    "KLAC", "SNPS", "CDNS", "ADBE", "CRM", "NOW", "CRWD", "PANW", "DDOG",
                    "ZS", "ORCL", "IBM", "CSCO", "ADI", "MCHP", "MRVL", "TTD"],
@@ -108,6 +115,46 @@ SECTOR_MAP = {
     "Utilities": ["NEE", "SO", "DUK"],
     "Real Estate": ["PLD"],
 }
+
+# ── Sector naming ──────────────────────────────────────────────────────────────
+# yfinance returns GICS-style sector names ("Consumer Cyclical", "Financial
+# Services", "Basic Materials"…) but every lookup table in this app is keyed by
+# the short names used in SECTOR_MAP / SECTOR_ETFS / SECTOR_PE_BENCHMARKS.
+# Normalise once, here, so the two vocabularies can never drift apart.
+CANONICAL_SECTORS = [
+    "Technology", "Consumer", "Financials", "Healthcare", "Industrials",
+    "Energy", "Communication", "Materials", "Utilities", "Real Estate",
+]
+
+_YF_SECTOR_ALIASES = {
+    "technology":             "Technology",
+    "information technology": "Technology",
+    "consumer cyclical":      "Consumer",
+    "consumer defensive":     "Consumer",
+    "consumer discretionary": "Consumer",
+    "consumer staples":       "Consumer",
+    "financial services":     "Financials",
+    "financial":              "Financials",
+    "financials":             "Financials",
+    "healthcare":             "Healthcare",
+    "health care":            "Healthcare",
+    "industrials":            "Industrials",
+    "energy":                 "Energy",
+    "communication services": "Communication",
+    "communication":          "Communication",
+    "basic materials":        "Materials",
+    "materials":              "Materials",
+    "utilities":              "Utilities",
+    "real estate":            "Real Estate",
+}
+
+
+def normalize_sector(raw: str | None) -> str:
+    """Map a yfinance sector string onto this app's canonical sector names."""
+    if not raw:
+        return "Unknown"
+    return _YF_SECTOR_ALIASES.get(str(raw).strip().lower(), "Unknown")
+
 
 # ── Scoring Weights ────────────────────────────────────────────────────────────
 WEIGHTS = {
