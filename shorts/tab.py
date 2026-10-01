@@ -110,8 +110,11 @@ def _bench_close(period: str = "1y") -> pd.Series | None:
         return None
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def run_short_analysis(tickers: tuple) -> list:
+# Disk-persisted on the same key scheme as the long screen: without it a
+# restart recomputed the whole bear screen, including ~100 fundamentals lookups
+# that the long screen's disk cache had made unnecessary for itself.
+@st.cache_data(persist="disk", max_entries=24, show_spinner=False)
+def run_short_analysis(tickers: tuple, *, bkt: str) -> list:
     prefetch_price_histories(list(tickers), period="1y")
     bench = _bench_close()
     quotes = _quotes(tickers)
@@ -272,7 +275,8 @@ def show_short_tab(tickers, top_n: int = 10) -> None:
             with st.expander("What the backtest actually found"):
                 st.markdown(EVIDENCE["detail"])
 
-    shorts = run_short_analysis(tuple(tickers))
+    from dashboard import _key, SCORE_TTL          # noqa: PLC0415 - cycle
+    shorts = run_short_analysis(tuple(tickers), bkt=_key(SCORE_TTL))
     if not shorts:
         st.error("No data returned. Check your internet connection.")
         return

@@ -24,12 +24,16 @@ Launch:
 import os
 import re
 import sys
+import hashlib
 import json
 import time
 import uuid
 import warnings
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from pathlib import Path
+import hashlib
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.ERROR)
@@ -54,6 +58,11 @@ from analyzers.fundamental import analyse_fundamental
 from analyzers.sentiment import analyse_sentiment
 from analyzers.macro import analyse_macro, update_sector_momentum, MACRO_FLAGS
 from scoring.scorer import build_stock_score, rank_stocks, StockScore
+
+# Cache windows, in seconds. These replace the ttl= arguments that persist=
+# would have silently ignored; see _bucket().
+SCORE_TTL = 1800   # 30 min - prices and scores
+FUND_TTL  = 3600   # 1 hr  - fundamentals move far more slowly
 from shorts.tab import show_short_tab
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -262,13 +271,67 @@ def get_news(tickers: tuple):
     return fetch_rss_news(list(tickers))
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_price_history(ticker: str, period: str = "6mo"):
+@lru_cache(maxsize=1)
+def _code_version() -> str:
+    """Short hash of the modules that decide a score.
+
+    Folded into the cache key so a deploy that changes scoring logic cannot keep
+    serving results computed by the old logic. The disk cache lives in /home and
+    outlives deployments, so without this the invalidation would depend on
+    someone remembering to bump a constant - and they would not.
+    """
+    h = hashlib.sha256()
+    base = Path(__file__).resolve().parent
+    for rel in ("config.py", "scoring/scorer.py", "analyzers/technical.py",
+                "analyzers/fundamental.py", "analyzers/sentiment.py",
+                "analyzers/macro.py", "data/fetcher.py"):
+        f = base / rel
+        if f.exists():
+            h.update(f.read_bytes())
+    return h.hexdigest()[:12]
+
+
+def _key(seconds: int) -> str:
+    """Cache key component: time bucket + code version."""
+    return f"{_bucket(seconds)}:{_code_version()}"
+
+
+def _bucket(seconds: int) -> int:
+    """Expiry expressed as part of the CACHE KEY rather than as a TTL.
+
+    WHY NOT JUST ttl= : Streamlit's own docstring says "ttl will be ignored if
+    persist='disk'". Adding persist to a ttl'd function therefore caches market
+    data FOREVER across restarts - you would reopen the app next week and be
+    shown last week's prices as today's, with nothing on screen admitting it.
+
+    Bucketing sidesteps that. Every call inside the same window produces the
+    same key and hits the disk cache (so a restart is free); the first call
+    after the window rolls produces a NEW key, misses, and refetches. Expiry
+    becomes a property of the key, which persist cannot ignore.
+
+    THE PARAMETER MUST NOT BE NAMED WITH A LEADING UNDERSCORE. Streamlit treats
+    `_name` as "do not hash this argument", so `_bkt` would be excluded from the
+    key and every bucket would collide - reintroducing the permanent cache this
+    exists to prevent. Verified: with `_bkt` the function ran once across three
+    buckets; with `bkt`, three times.
+    """
+    import time as _t
+    return int(_t.time() // seconds)
+
+
+# Disk-persisted so an App Service restart does not re-pay the ~105s warm.
+#
+# WHERE IT ACTUALLY LANDS: ~/.streamlit/cache, i.e. /home on Azure - NOT the
+# working directory. /home survives restarts, which is the point, but it also
+# survives DEPLOYS. So a scoring change would ship and keep serving pre-change
+# results from disk, which is why _code_version() is part of the key.
+@st.cache_data(persist="disk", max_entries=512, show_spinner=False)
+def get_price_history(ticker: str, period: str = "6mo", *, bkt: str):
     return fetch_price_history(ticker, period=period)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_fundamentals(ticker: str):
+@st.cache_data(persist="disk", max_entries=512, show_spinner=False)
+def get_fundamentals(ticker: str, *, bkt: str):
     return fetch_fundamentals(ticker)
 
 
@@ -282,8 +345,8 @@ def get_watchlist_quotes(tickers: tuple) -> dict:
 
 def analyse_ticker(ticker, news_map, quotes):
     try:
-        df        = get_price_history(ticker)
-        fund_data = get_fundamentals(ticker)
+        df        = get_price_history(ticker, bkt=_key(SCORE_TTL))
+        fund_data = get_fundamentals(ticker, bkt=_key(FUND_TTL))
         quote     = quotes.get(ticker, {})
         price     = quote.get("price", float(df["Close"].iloc[-1]) if not df.empty else 0)
 
@@ -297,8 +360,8 @@ def analyse_ticker(ticker, news_map, quotes):
         return None
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def run_full_analysis(tickers: tuple, macro_flags: tuple) -> list:
+@st.cache_data(persist="disk", max_entries=24, show_spinner=False)
+def run_full_analysis(tickers: tuple, macro_flags: tuple, *, bkt: str) -> list:
     flags_dict = dict(macro_flags)
     for k, v in flags_dict.items():
         MACRO_FLAGS[k] = v
@@ -608,7 +671,7 @@ def show_stock_analysis(stock: StockScore, context: str = "main"):
     d_left, d_right = st.columns([2, 1])
 
     with d_left:
-        df_chart = get_price_history(stock.ticker, "6mo")
+        df_chart = get_price_history(stock.ticker, "6mo", bkt=_key(SCORE_TTL))
         if not df_chart.empty:
             st.plotly_chart(
                 build_price_chart(stock.ticker, df_chart),
@@ -747,11 +810,11 @@ def show_daily_tab(tickers, top_n, macro_flags):
         loading_slot = st.empty()
         with loading_slot:
             components.html(_make_loading_html(n, est_secs), height=520, scrolling=False)
-        scores = run_full_analysis(tickers_t, macro_flags)
+        scores = run_full_analysis(tickers_t, macro_flags, bkt=_key(SCORE_TTL))
         loading_slot.empty()
         _mark_loaded(cache_key)
     else:
-        scores = run_full_analysis(tickers_t, macro_flags)
+        scores = run_full_analysis(tickers_t, macro_flags, bkt=_key(SCORE_TTL))
 
     if not scores:
         st.error("No data returned. Check your internet connection.")
@@ -927,11 +990,11 @@ def show_sector_browser(macro_flags):
             components.html(
                 _make_loading_html(sec_n, sec_est), height=520, scrolling=False
             )
-        sector_scores = run_full_analysis(sector_tickers, macro_flags)
+        sector_scores = run_full_analysis(sector_tickers, macro_flags, bkt=_key(SCORE_TTL))
         sec_slot.empty()
         _mark_loaded(sec_cache_key)
     else:
-        sector_scores = run_full_analysis(sector_tickers, macro_flags)
+        sector_scores = run_full_analysis(sector_tickers, macro_flags, bkt=_key(SCORE_TTL))
 
     if not sector_scores:
         st.error("No data returned. Check your connection.")
@@ -1122,11 +1185,11 @@ def show_watchlist_tab(macro_flags: tuple):
         wl_slot = st.empty()
         with wl_slot:
             components.html(_make_loading_html(wl_n, wl_est), height=520, scrolling=False)
-        wl_scores = run_full_analysis(wl_t, macro_flags)
+        wl_scores = run_full_analysis(wl_t, macro_flags, bkt=_key(SCORE_TTL))
         wl_slot.empty()
         _mark_loaded(wl_cache_key)
     else:
-        wl_scores = run_full_analysis(wl_t, macro_flags)
+        wl_scores = run_full_analysis(wl_t, macro_flags, bkt=_key(SCORE_TTL))
 
     if not wl_scores:
         st.warning(
@@ -1287,7 +1350,17 @@ def _warm_once(tickers: tuple):
     cache_resource rather than cache_data: this returns nothing useful, it is
     called purely so Streamlit runs it once instead of on every rerun.
     """
-    start_cache_warm(list(tickers))
+    # OFF by default. It existed to pay the fundamentals cost before a user
+    # arrived, but disk persistence now does that better: a restart reads the
+    # finished result rather than refetching the inputs. Measured with the disk
+    # cache warm, the thread was pure redundant load - it cannot see Streamlit's
+    # cache, so it refetched all 101 tickers that the cache had already made
+    # unnecessary, and competed for the same semaphore while doing it.
+    #
+    # Still worth enabling (CACHE_WARM=1) if you deploy often: a deploy changes
+    # the code hash in the key, so the first load after one is a genuine miss.
+    if os.getenv("CACHE_WARM", "0") == "1":
+        start_cache_warm(list(tickers))
     return True
 
 
