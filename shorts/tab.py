@@ -361,7 +361,7 @@ def show_short_tab(tickers, top_n: int = 10) -> None:
         df_hist = _history(s.ticker)
         if df_hist is not None and not df_hist.empty:
             st.plotly_chart(_short_chart(s.ticker, df_hist, s),
-                            width='stretch', key=f"short_chart_{s.ticker}")
+                            key=f"short_chart_{s.ticker}")
     with g2:
         st.plotly_chart(_subscore_radar(s),
                         key=f"short_radar_{s.ticker}")

@@ -611,17 +611,17 @@ def show_stock_analysis(stock: StockScore, context: str = "main"):
         if not df_chart.empty:
             st.plotly_chart(
                 build_price_chart(stock.ticker, df_chart),
-                width='stretch', key=f"price_{pfx}",
+                key=f"price_{pfx}",
             )
             st.plotly_chart(
                 build_rsi_chart(stock.ticker, df_chart),
-                width='stretch', key=f"rsi_{pfx}",
+                key=f"rsi_{pfx}",
             )
 
     with d_right:
         st.plotly_chart(
             build_radar(stock),
-            width='stretch', key=f"radar_{pfx}",
+            key=f"radar_{pfx}",
         )
         st.markdown(f"### {stock.ticker} — {stock.grade}")
         ind = stock.indicators
@@ -960,7 +960,7 @@ def show_sector_browser(macro_flags):
     st.subheader(f"📊 {icon} {selected_sector} — Score Comparison")
     st.plotly_chart(
         build_score_bar(sector_scores, height=320),
-        width='stretch', key=f"score_bar_sector_{selected_sector}",
+        key=f"score_bar_sector_{selected_sector}",
     )
 
     st.divider()
@@ -1208,7 +1208,7 @@ def show_watchlist_tab(macro_flags: tuple):
     st.subheader("📊 Score Comparison")
     st.plotly_chart(
         build_score_bar(wl_scores, height=max(240, wl_n * 24)),
-        width='stretch', key="score_bar_watchlist",
+        key="score_bar_watchlist",
     )
     st.divider()
 
