@@ -139,7 +139,27 @@ def get_spot() -> dict:
         if q:
             return q
 
-    # 1. Massive — the metal itself, with a real two-sided quote.
+    # 0. Streamed tick — same venue as tier 1, but held open in a background
+    #    thread so the quote is sub-second rather than up to one poll old.
+    #    Returns None when absent or stale, which simply falls through to REST;
+    #    a broken socket must never take the card down with it.
+    if massive.available():
+        try:
+            t = massive.stream_quote()
+            if t:
+                return {
+                    "price": t["price"], "bid": t["bid"], "ask": t["ask"],
+                    "spread": t["spread"], "spread_x": t.get("spread_x"),
+                    "is_spot": True, "two_sided": True, "streamed": True,
+                    "age": t.get("age"),
+                    "source": "Massive XAU/USD — live stream (WebSocket)",
+                    "ts": t["ts"],
+                }
+        except Exception:
+            pass
+
+    # 1. Massive REST — same data, one poll behind. The fallback when the
+    #    socket is down, reconnecting, or the market is shut.
     if massive.available():
         try:
             q = massive.last_quote()

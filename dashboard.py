@@ -611,17 +611,17 @@ def show_stock_analysis(stock: StockScore, context: str = "main"):
         if not df_chart.empty:
             st.plotly_chart(
                 build_price_chart(stock.ticker, df_chart),
-                use_container_width=True, key=f"price_{pfx}",
+                width='stretch', key=f"price_{pfx}",
             )
             st.plotly_chart(
                 build_rsi_chart(stock.ticker, df_chart),
-                use_container_width=True, key=f"rsi_{pfx}",
+                width='stretch', key=f"rsi_{pfx}",
             )
 
     with d_right:
         st.plotly_chart(
             build_radar(stock),
-            use_container_width=True, key=f"radar_{pfx}",
+            width='stretch', key=f"radar_{pfx}",
         )
         st.markdown(f"### {stock.ticker} — {stock.grade}")
         ind = stock.indicators
@@ -780,11 +780,11 @@ def show_daily_tab(tickers, top_n, macro_flags):
     left, right = st.columns([3, 1])
     with left:
         st.subheader("📊 All Stocks by Score (Top 30)")
-        st.plotly_chart(build_score_bar(scores), use_container_width=True, key="score_bar_daily")
+        st.plotly_chart(build_score_bar(scores), width='stretch', key="score_bar_daily")
     with right:
         if sector_returns:
             st.subheader("🔄 Sector Rotation (1d)")
-            st.plotly_chart(build_sector_chart(sector_returns), use_container_width=True, key="sector_rot_daily")
+            st.plotly_chart(build_sector_chart(sector_returns), width='stretch', key="sector_rot_daily")
 
     st.subheader(f"📊 Top {top_n} by Composite Score")
     st.caption(
@@ -800,7 +800,7 @@ def show_daily_tab(tickers, top_n, macro_flags):
         .map(colour_chg,   subset=["Chg %"])
         .format({"Score": "{:.1f}"})
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
+    st.dataframe(styled, width='stretch', hide_index=True, height=420)
 
     st.divider()
     st.subheader("🔍 Stock Deep Dive")
@@ -837,7 +837,7 @@ def show_search_tab(macro_flags):
         )
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.button("🔍 Analyse", type="primary", use_container_width=True, key="search_btn")
+        st.button("🔍 Analyse", type="primary", width='stretch', key="search_btn")
 
     if not query:
         st.info(
@@ -960,7 +960,7 @@ def show_sector_browser(macro_flags):
     st.subheader(f"📊 {icon} {selected_sector} — Score Comparison")
     st.plotly_chart(
         build_score_bar(sector_scores, height=320),
-        use_container_width=True, key=f"score_bar_sector_{selected_sector}",
+        width='stretch', key=f"score_bar_sector_{selected_sector}",
     )
 
     st.divider()
@@ -975,7 +975,7 @@ def show_sector_browser(macro_flags):
         .map(colour_chg,   subset=["Chg %"])
         .format({"Score": "{:.1f}"})
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+    st.dataframe(styled, width='stretch', hide_index=True, height=500)
 
     st.divider()
 
@@ -1028,7 +1028,7 @@ def show_watchlist_tab(macro_flags: tuple):
             )
         with btn_col:
             add_clicked = st.form_submit_button(
-                "➕ Add", type="primary", use_container_width=True
+                "➕ Add", type="primary", width='stretch'
             )
 
     if add_clicked and new_q.strip():
@@ -1081,7 +1081,7 @@ def show_watchlist_tab(macro_flags: tuple):
         )
     with act_col:
         btn_label = "🗑️ Remove" if to_remove else "🔄 Refresh"
-        act_btn   = st.button(btn_label, use_container_width=True, key="wl_action")
+        act_btn   = st.button(btn_label, width='stretch', key="wl_action")
 
     if act_btn and to_remove:
         for t in to_remove:
@@ -1208,7 +1208,7 @@ def show_watchlist_tab(macro_flags: tuple):
     st.subheader("📊 Score Comparison")
     st.plotly_chart(
         build_score_bar(wl_scores, height=max(240, wl_n * 24)),
-        use_container_width=True, key="score_bar_watchlist",
+        width='stretch', key="score_bar_watchlist",
     )
     st.divider()
 
@@ -1249,7 +1249,7 @@ def show_watchlist_tab(macro_flags: tuple):
         .map(colour_chg,   subset=["Chg %"])
         .format({"Score": "{:.1f}"})
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True,
+    st.dataframe(styled, width='stretch', hide_index=True,
                  height=min(600, 60 + len(rows) * 38))
     st.divider()
 

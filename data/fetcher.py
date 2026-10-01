@@ -41,6 +41,14 @@ _FUND_CACHE_TIME: dict = {}
 FUND_CACHE_TTL = 4 * 3600
 
 # ── In-memory price-history cache (30-min TTL, matches Streamlit cache) ────────
+# Keyed by (ticker, period) — NOT ticker alone.
+#
+# It was ticker-only, and that silently served the wrong window: the Daily
+# Rankings tab prefetches "6mo" first, so a later request for "1y" found a
+# fresh entry under the same key and got six months back while believing it had
+# a year. Nothing errored; the Short Candidates screen simply scored EMA200 on
+# ~126 unconverged bars. A cache key must contain everything that changes the
+# value, or it is not a cache, it is a bug with a hit rate.
 _PRICE_CACHE:      dict = {}
 _PRICE_CACHE_TIME: dict = {}
 PRICE_CACHE_TTL = 30 * 60    # 30 minutes
@@ -99,8 +107,9 @@ def fetch_price_history(ticker: str, period: str = "6mo", interval: str = "1d") 
     # ── In-memory cache hit (populated by prefetch_price_histories) ─────────────
     if interval == "1d":
         now = time.monotonic()
-        if ticker in _PRICE_CACHE and (now - _PRICE_CACHE_TIME.get(ticker, 0)) < PRICE_CACHE_TTL:
-            return _PRICE_CACHE[ticker]
+        ck = (ticker, period)
+        if ck in _PRICE_CACHE and (now - _PRICE_CACHE_TIME.get(ck, 0)) < PRICE_CACHE_TTL:
+            return _PRICE_CACHE[ck]
 
     for attempt in range(3):
         try:
@@ -111,8 +120,8 @@ def fetch_price_history(ticker: str, period: str = "6mo", interval: str = "1d") 
             result = _flatten(df) if not df.empty else df
             # Populate price cache so repeated individual calls are instant
             if interval == "1d" and not result.empty:
-                _PRICE_CACHE[ticker]      = result
-                _PRICE_CACHE_TIME[ticker] = time.monotonic()
+                _PRICE_CACHE[(ticker, period)]      = result
+                _PRICE_CACHE_TIME[(ticker, period)] = time.monotonic()
             return result
         except RuntimeError as exc:
             if "dictionary changed size" in str(exc) and attempt < 2:
@@ -140,8 +149,8 @@ def prefetch_price_histories(tickers: list, period: str = "6mo") -> int:
     now = time.monotonic()
     to_fetch = [
         t for t in tickers
-        if t not in _PRICE_CACHE
-        or (now - _PRICE_CACHE_TIME.get(t, 0)) >= PRICE_CACHE_TTL
+        if (t, period) not in _PRICE_CACHE
+        or (now - _PRICE_CACHE_TIME.get((t, period), 0)) >= PRICE_CACHE_TTL
     ]
     if not to_fetch:
         return 0
@@ -156,8 +165,8 @@ def prefetch_price_histories(tickers: list, period: str = "6mo") -> int:
                     result = _flatten(raw)
                     if not result.empty:
                         ts = time.monotonic()
-                        _PRICE_CACHE[to_fetch[0]]      = result
-                        _PRICE_CACHE_TIME[to_fetch[0]] = ts
+                        _PRICE_CACHE[(to_fetch[0], period)]      = result
+                        _PRICE_CACHE_TIME[(to_fetch[0], period)] = ts
                     return 1 if not result.empty else 0
                 else:
                     raw = yf.download(list(to_fetch), period=period, interval="1d",
@@ -171,8 +180,8 @@ def prefetch_price_histories(tickers: list, period: str = "6mo") -> int:
                 try:
                     df = _flatten(raw[ticker].dropna())
                     if not df.empty:
-                        _PRICE_CACHE[ticker]      = df
-                        _PRICE_CACHE_TIME[ticker] = ts
+                        _PRICE_CACHE[(ticker, period)]      = df
+                        _PRICE_CACHE_TIME[(ticker, period)] = ts
                         count += 1
                 except Exception as e:
                     log.debug("Prefetch parse error %s: %s", ticker, e)

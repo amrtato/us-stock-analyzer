@@ -307,7 +307,7 @@ def show_short_tab(tickers, top_n: int = 10) -> None:
               .map(_colour_bear, subset=["Bear", "Trend", "Mom"])
               .map(_colour_chg, subset=["Chg %"])
               .format({"Bear": "{:.1f}"}))
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
+    st.dataframe(styled, width='stretch', hide_index=True, height=420)
 
     if gated:
         with st.expander(f"⚠️ {len(gated)} name(s) failed a tradeability gate"):
@@ -361,9 +361,9 @@ def show_short_tab(tickers, top_n: int = 10) -> None:
         df_hist = _history(s.ticker)
         if df_hist is not None and not df_hist.empty:
             st.plotly_chart(_short_chart(s.ticker, df_hist, s),
-                            use_container_width=True, key=f"short_chart_{s.ticker}")
+                            width='stretch', key=f"short_chart_{s.ticker}")
     with g2:
-        st.plotly_chart(_subscore_radar(s), use_container_width=True,
+        st.plotly_chart(_subscore_radar(s), width='stretch',
                         key=f"short_radar_{s.ticker}")
 
     advice_html = s.trade_advice.replace("\n\n", "<br><br>").replace("\n", "<br>")

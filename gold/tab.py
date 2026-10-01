@@ -33,10 +33,46 @@ def _hourly():
     return fetch_hourly("2y")
 
 
-@st.cache_data(ttl=3, show_spinner=False)
+def _stream_note(q) -> str:
+    """Describe the transport honestly, including a degraded socket.
+
+    A stalled stream silently falling back to polling would look identical to a
+    healthy one, so the reason is printed rather than hidden.
+    """
+    if q.get("streamed"):
+        age = q.get("age")
+        return f"streaming (tick {age:.1f}s old)" if age is not None else "streaming"
+    st_ = massive.get_stream()
+    if st_ is None:
+        return "polled every 1s"
+    h = st_.health()
+    if h.get("error"):
+        return f"polled - stream down ({h['error'][:40]})"
+    if h.get("reconnects"):
+        return f"polled - stream reconnecting ({h['reconnects']}x)"
+    return "polled every 1s - stream starting"
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_stream():
+    """Open the tick socket once per server process.
+
+    cache_resource (not cache_data) because the value is a live thread, not a
+    serialisable result, and it must be shared by every viewer. Streamlit reruns
+    this module constantly; without the cache each rerun would open another
+    socket and get the account throttled for self-inflicted reasons.
+    """
+    return massive.get_stream()
+
+
+@st.cache_data(ttl=1, show_spinner=False)
 def _spot():
-    """3s cache, shorter than the 5s fragment timer so each tick fetches fresh.
-    Still cached, so several viewers do not each hit Binance every 5s."""
+    """1s cache matching the fragment timer.
+
+    When the stream is up this is nearly free — get_spot() reads the newest tick
+    straight out of memory and makes no network call at all. The TTL only
+    throttles the REST fallback used while the socket is down or the market shut.
+    """
     return get_spot()
 
 
@@ -63,18 +99,26 @@ def _vol_chart(sel_hour: int) -> go.Figure:
     return fig
 
 
-@st.fragment(run_every="5s")
+@st.fragment(run_every="1s")
 def _live_block(d):
     """
-    Live price + trade levels, re-running on a 5s timer.
+    Live price + trade levels, re-running on a 1s timer.
 
     st.fragment reruns ONLY this function, not the whole page. Without it the
     price would sit frozen until the user clicked something, and a full-page
-    autorefresh would re-execute the stock pipeline every few seconds and reset
-    the cost slider on every tick.
+    autorefresh would re-execute the stock pipeline every second and reset the
+    cost slider constantly.
 
-    5s is comfortable: the Massive quote costs ~0.2s and refreshes every ~2s upstream.
+    WHY 1s AND NOT FASTER
+        The feed delivers ~1.6 ticks/sec, so the price itself is never more than
+        a fraction of a second old once the WebSocket is up — reading it costs
+        nothing, it is already in memory. The limit is Streamlit: each rerun
+        re-renders the fragment server-side and ships it to the browser, so
+        sub-second timers buy flicker rather than information. True per-tick
+        repainting would require the socket in the BROWSER, which on a public
+        site means handing the API key to every visitor.
     """
+    _ensure_stream()
     sc = signal_card(d)
     q = _spot()
     if sc.get("ok"):
@@ -99,8 +143,10 @@ def _live_block(d):
         two_sided = q.get("two_sided", False)
         # Three tiers, three colours — the user should never have to guess which
         # feed produced the number their orders are based on.
-        if is_spot and two_sided:
-            src_col, src_label = "#00ff88", "XAU/USD SPOT · LIVE BID/ASK"
+        if is_spot and two_sided and q.get("streamed"):
+            src_col, src_label = "#00ff88", "XAU/USD SPOT · STREAMING BID/ASK"
+        elif is_spot and two_sided:
+            src_col, src_label = "#00ff88", "XAU/USD SPOT · LIVE BID/ASK (POLLED)"
         elif is_spot:
             src_col, src_label = "#00aaff", "XAU/USD SPOT · MID ONLY"
         else:
@@ -181,7 +227,7 @@ def _live_block(d):
                 f'line-height:1.1;">${sc["price"]:,.2f}{tick}</div>'
                 f'{bidask}'
                 f'<div style="font-size:.75em;color:#666;margin-top:3px;">'
-                f'{q["source"]}<br>quote {tstr} · checked {checked} · every 5s</div></div>',
+                f'{q["source"]}<br>quote {tstr} · checked {checked} · {_stream_note(q)}</div></div>',
                 unsafe_allow_html=True,
             )
         with p2:
@@ -260,7 +306,7 @@ def _live_block(d):
                 {"Stop": "0.50×ATR", "Win %": "44.9%", "Profit factor": "0.98", "Verdict": "loses"},
                 {"Stop": "1.00×ATR", "Win %": "46.6%", "Profit factor": "1.15", "Verdict": "profitable"},
                 {"Stop": "1.50×ATR", "Win %": "46.8%", "Profit factor": "1.15", "Verdict": "profitable ✓ used"},
-            ]), hide_index=True, use_container_width=True)
+            ]), hide_index=True, width='stretch')
             st.caption(
                 "Tightening the stop lowers the win rate *and* the profit factor here — "
                 "the stop is hit by noise before the drift arrives. Tight stops need an "
@@ -328,7 +374,7 @@ def show_gold_tab() -> None:
     )
     left, right = st.columns([2, 1])
     with left:
-        st.plotly_chart(_vol_chart(s["hour"]), use_container_width=True, key="gold_vol")
+        st.plotly_chart(_vol_chart(s["hour"]), width='stretch', key="gold_vol")
     with right:
         for name, hrs in R.SESSIONS:
             avg = sum(R.VOL_PROFILE[h] for h in hrs if h in R.VOL_PROFILE) / \
@@ -375,7 +421,7 @@ def show_gold_tab() -> None:
                          "Share lost": f"{p:.1f}%",
                          "Assessment": "Spread dominates" if p > 15 else
                                        "Marginal" if p > 5 else "Workable"})
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
 
     st.divider()
 
@@ -428,7 +474,7 @@ def show_gold_tab() -> None:
                       xaxis=dict(gridcolor="rgba(0,0,0,0)"),
                       yaxis=dict(title="Net $ per 1.0 lot", gridcolor="#252540"),
                       showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, key="gold_years")
+    st.plotly_chart(fig, width='stretch', key="gold_years")
     st.caption(
         "2025–26 alone are 86% of the eight-year total, while 2021 and 2022 both lost money. "
         "This pays in strongly trending gold and bleeds when gold ranges — which is leveraged "
@@ -458,7 +504,7 @@ def show_gold_tab() -> None:
         t["Net $/lot"] = t["net_lot"].map("{:+,.2f}".format)
         t["Result"] = t["win"].map({True: "WIN", False: "LOSS"})
         st.dataframe(t[["Date", "Entry", "Exit", "Net $/lot", "Result"]].iloc[::-1],
-                     hide_index=True, use_container_width=True, height=280)
+                     hide_index=True, width='stretch', height=280)
         st.caption(
             "Forward results only. Compare the win rate above against the 50.1% eight-year "
             "figure, not against the 57.5% holdout — the holdout sat entirely inside gold's "
