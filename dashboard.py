@@ -46,7 +46,8 @@ from config import (
     ALL_STOCKS, DJIA_STOCKS, NASDAQ_TOP, SP500_TOP,
     SECTOR_STOCKS,
 )
-from data.fetcher import fetch_price_history, fetch_fundamentals, fetch_batch_quotes, prefetch_price_histories
+from data.fetcher import (fetch_price_history, fetch_fundamentals, fetch_batch_quotes,
+                          prefetch_price_histories, start_cache_warm, warm_status)
 from data.news_fetcher import fetch_rss_news, aggregate_ticker_news
 from analyzers.technical import analyse_technical
 from analyzers.fundamental import analyse_fundamental
@@ -1279,7 +1280,22 @@ def show_watchlist_tab(macro_flags: tuple):
 # Main entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@st.cache_resource(show_spinner=False)
+def _warm_once(tickers: tuple):
+    """Start the background cache warm exactly once per server process.
+
+    cache_resource rather than cache_data: this returns nothing useful, it is
+    called purely so Streamlit runs it once instead of on every rerun.
+    """
+    start_cache_warm(list(tickers))
+    return True
+
+
 def main():
+    # Warm the caches off the request path. Cold start is ~90% fundamentals, and
+    # before this the first visitor after a restart paid all of it.
+    _warm_once(tuple(ALL_STOCKS))
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.title("⚙️ Settings")
@@ -1324,6 +1340,11 @@ def main():
             st.cache_data.clear()
             st.rerun()
         st.caption("Data cached 30 min · Fundamentals 4 hr")
+        w = warm_status()
+        if w["started"] and not w["done"]:
+            st.caption(f"⏳ Warming cache: {w['funds']}/{w['total']} fundamentals")
+        elif w["done"] and w["started"]:
+            st.caption(f"✅ Cache warmed in {w['done'] - w['started']:.0f}s")
 
     # ── Header ────────────────────────────────────────────────────────────────
     col_title, col_date = st.columns([3, 1])

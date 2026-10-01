@@ -13,7 +13,9 @@ All fundamental ratios are derived from these sources, giving us identical
 """
 import time
 import logging
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import warnings
 from typing import Optional
 
@@ -27,13 +29,29 @@ from config import normalize_sector
 
 log = logging.getLogger(__name__)
 
-# ── Semaphore: fully serialise yfinance .info-class calls ─────────────────────
+# ── Concurrency limit for yfinance .info-class calls ──────────────────────────
 # Each fetch_fundamentals makes 4 HTTP calls (fast_info, income_stmt,
-# balance_sheet, analyst_price_targets).  Running even 2 tickers at once
-# means 8 simultaneous Yahoo requests → "Invalid Crumb" 401s.
-# Semaphore(1) serialises them entirely; Streamlit's 1-hour cache means
-# this only happens once per session.
-_YF_SEM = threading.Semaphore(1)
+# balance_sheet, analyst_price_targets).
+#
+# This was Semaphore(1) because concurrent calls used to return "Invalid Crumb"
+# 401s. RE-MEASURED 2026-10-01 on 20 tickers, counting how many came back with a
+# real sector (only a successful call can supply one):
+#     concurrency 1 -> 32.3s, 20/20 good
+#     concurrency 3 -> 12.5s, 20/20 good   (2.6x)
+#     concurrency 6 -> 10.4s, 20/20 good   (3.1x)
+# No degradation at any level, so the serialisation was costing ~150s of the
+# ~169s cold start for a hazard that no longer reproduces.
+#
+# Settled on 4: past ~3 the curve flattens, and a failure here is silent (a
+# blocked call returns defaults rather than raising), so there is no reason to
+# sit near the edge for a few seconds. Override with YF_FUNDAMENTALS_CONCURRENCY
+# if Yahoo tightens again — a dial beats a redeploy.
+#
+# NOTE: measured against the locally installed yfinance; requirements.txt pins an
+# older one for Azure. If sectors start coming back "Unknown" in production, set
+# that env var to 1 first, then investigate.
+_YF_CONCURRENCY = max(1, int(os.getenv("YF_FUNDAMENTALS_CONCURRENCY", "4")))
+_YF_SEM = threading.Semaphore(_YF_CONCURRENCY)
 
 # ── In-memory cache (4-hour TTL) ───────────────────────────────────────────────
 _FUND_CACHE:      dict = {}
@@ -484,3 +502,63 @@ def fetch_fundamentals(ticker: str) -> dict:
     _FUND_CACHE[ticker]      = result
     _FUND_CACHE_TIME[ticker] = time.monotonic()
     return result
+
+
+# ── Background cache warm-up ──────────────────────────────────────────────────
+# Cold start is dominated by fundamentals: 101 tickers took ~153s of a ~169s
+# total before concurrency was raised. With AlwaysOn the process is long-lived,
+# so that cost is paid once per restart — and it was being paid by whoever
+# happened to open the page first.
+#
+# This moves it off the request path: the work starts as soon as the process
+# does, so by the time anyone arrives the caches are warm (or warming) and the
+# page assembles from memory.
+#
+# It deliberately touches ONLY the plain-dict caches in this module, never a
+# Streamlit API. st.cache_data requires a ScriptRunContext that a bare thread
+# does not have, and calling into it from here would either throw or silently
+# write to a context nobody reads.
+_WARM_LOCK = threading.Lock()
+_warm_thread: Optional[threading.Thread] = None
+_warm_state: dict = {"started": None, "done": None, "funds": 0, "total": 0, "error": None}
+
+
+def warm_status() -> dict:
+    """Snapshot for the UI, so a warming app can say so instead of looking hung."""
+    with _WARM_LOCK:
+        return dict(_warm_state)
+
+
+def start_cache_warm(tickers: list, periods: tuple = ("6mo", "1y")) -> None:
+    """Kick off a one-shot background warm. Idempotent; safe on every rerun."""
+    global _warm_thread
+    with _WARM_LOCK:
+        if _warm_thread is not None and _warm_thread.is_alive():
+            return
+        if _warm_state["done"] is not None:
+            return                                   # already warmed this process
+        _warm_state.update({"started": time.time(), "total": len(tickers),
+                            "funds": 0, "done": None, "error": None})
+
+    def _run():
+        try:
+            for period in periods:
+                prefetch_price_histories(list(tickers), period=period)
+            # Fundamentals are the expensive part; run them through the same
+            # semaphore the request path uses so the two cannot combine to
+            # exceed the concurrency limit.
+            with ThreadPoolExecutor(max_workers=_YF_CONCURRENCY) as pool:
+                for _ in pool.map(fetch_fundamentals, tickers):
+                    with _WARM_LOCK:
+                        _warm_state["funds"] += 1
+        except Exception as exc:                     # never kill the app
+            with _WARM_LOCK:
+                _warm_state["error"] = str(exc)[:200]
+        finally:
+            with _WARM_LOCK:
+                _warm_state["done"] = time.time()
+
+    t = threading.Thread(target=_run, name="cache-warm", daemon=True)
+    with _WARM_LOCK:
+        _warm_thread = t
+    t.start()
