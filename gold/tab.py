@@ -374,7 +374,7 @@ def show_gold_tab() -> None:
     )
     left, right = st.columns([2, 1])
     with left:
-        st.plotly_chart(_vol_chart(s["hour"]), width='stretch', key="gold_vol")
+        st.plotly_chart(_vol_chart(s["hour"]), key="gold_vol")
     with right:
         for name, hrs in R.SESSIONS:
             avg = sum(R.VOL_PROFILE[h] for h in hrs if h in R.VOL_PROFILE) / \
@@ -474,7 +474,7 @@ def show_gold_tab() -> None:
                       xaxis=dict(gridcolor="rgba(0,0,0,0)"),
                       yaxis=dict(title="Net $ per 1.0 lot", gridcolor="#252540"),
                       showlegend=False)
-    st.plotly_chart(fig, width='stretch', key="gold_years")
+    st.plotly_chart(fig, key="gold_years")
     st.caption(
         "2025–26 alone are 86% of the eight-year total, while 2021 and 2022 both lost money. "
         "This pays in strongly trending gold and bleeds when gold ranges — which is leveraged "

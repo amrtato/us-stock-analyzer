@@ -780,11 +780,11 @@ def show_daily_tab(tickers, top_n, macro_flags):
     left, right = st.columns([3, 1])
     with left:
         st.subheader("📊 All Stocks by Score (Top 30)")
-        st.plotly_chart(build_score_bar(scores), width='stretch', key="score_bar_daily")
+        st.plotly_chart(build_score_bar(scores), key="score_bar_daily")
     with right:
         if sector_returns:
             st.subheader("🔄 Sector Rotation (1d)")
-            st.plotly_chart(build_sector_chart(sector_returns), width='stretch', key="sector_rot_daily")
+            st.plotly_chart(build_sector_chart(sector_returns), key="sector_rot_daily")
 
     st.subheader(f"📊 Top {top_n} by Composite Score")
     st.caption(
