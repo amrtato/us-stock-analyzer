@@ -36,6 +36,12 @@ Thumbs.db
 # backtest artefacts
 .scored_cache.csv
 .panel5y.csv
+.short_panel5y.csv
 
 # local dev launch config (machine-specific paths)
 .claude/
+
+# MT5 exports (large, broker-specific)
+gold/data/
+gold/.gold_*.csv
+gold/.gold_1h.csv

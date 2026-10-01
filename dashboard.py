@@ -1,10 +1,22 @@
 """
-US Stock Analyzer — Streamlit Dashboard
+Daily Market Analyzer — Streamlit Dashboard
+
+Covers two instruments with deliberately different treatments:
+
+  US STOCKS — scored and ranked on four weighted pillars.
+  GOLD      — risk and volatility only. No score, no ranking, no direction.
+              Walk-forward testing over 2018-2026 (daily, hourly and minute
+              data, including ICT setups and cross-asset drivers) produced no
+              tradeable directional signal, so the gold tab does not emit one.
 
 Tabs:
-  1. Daily Rankings   — ranked top-N from the selected universe
+  1. Daily Rankings   — ranked top-N from the selected stock universe
   2. Stock Search     — analyse any ticker or company name on demand
   3. Sector Browser   — compare top 20 stocks in each market sector
+  4. Watch List       — per-browser saved tickers with live prices
+  5. Gold Risk        — session volatility, trade-cost check, monitored hypothesis
+  6. Short Candidates — bearish screen for short selling (a separate model, NOT an
+                        inversion of the long score — see analyzers/bearish.py)
 
 Launch:
     streamlit run dashboard.py
@@ -41,51 +53,21 @@ from analyzers.fundamental import analyse_fundamental
 from analyzers.sentiment import analyse_sentiment
 from analyzers.macro import analyse_macro, update_sector_momentum, MACRO_FLAGS
 from scoring.scorer import build_stock_score, rank_stocks, StockScore
+from shorts.tab import show_short_tab
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="US Stock Analyzer",
-    page_icon="📈",
+    page_title="Daily Market Analyzer",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ── Styles ─────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .metric-card {
-        background: #1e1e2e; border-radius: 10px;
-        padding: 16px 20px; margin: 4px 0;
-    }
-    .grade-A { color: #00ff88; font-weight: bold; font-size: 1.2em; }
-    .grade-B { color: #ffd700; font-weight: bold; font-size: 1.2em; }
-    .grade-C { color: #ff8c00; font-weight: bold; font-size: 1.2em; }
-    .grade-D { color: #ff4444; font-weight: bold; font-size: 1.2em; }
-    .tf-badge {
-        display: inline-block; padding: 2px 8px; border-radius: 4px;
-        font-size: 0.75em; font-weight: bold; margin: 1px;
-    }
-    .tf-scalp  { background: #ff4444; color: white; }
-    .tf-day    { background: #ff8c00; color: white; }
-    .tf-swing  { background: #00aaff; color: white; }
-    .tf-invest { background: #00cc66; color: white; }
-    .tf-watch  { background: #555; color: #ccc; }
-    .status-banner {
-        border-radius: 10px; padding: 18px 24px; margin: 10px 0 16px 0;
-        display: flex; align-items: center; gap: 20px;
-    }
-    .status-pill {
-        display: inline-block; padding: 5px 16px; border-radius: 20px;
-        font-weight: bold; font-size: 1em; letter-spacing: 0.5px;
-    }
-    .advice-box {
-        background: #1a1f2e; border-left: 4px solid #00aaff;
-        border-radius: 0 8px 8px 0; padding: 16px 20px; margin: 10px 0;
-        font-size: 0.92em; line-height: 1.7;
-    }
-    div[data-testid="stMetricValue"] { font-size: 1.6rem !important; }
-</style>
-""", unsafe_allow_html=True)
+# Single source of truth in styles.py so dashboard.py and gold_only.py stay in
+# sync — a missing class renders unstyled HTML with no error to catch it.
+from styles import inject as _inject_css
+_inject_css()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 SECTOR_ETFS = {
@@ -1346,10 +1328,16 @@ def main():
     # ── Header ────────────────────────────────────────────────────────────────
     col_title, col_date = st.columns([3, 1])
     with col_title:
-        st.title("📈 US Stock Daily Analyzer")
+        st.title("📊 Daily Market Analyzer")
+        # Two instruments, two treatments — stated plainly rather than implying
+        # gold gets the same scoring the stocks do. It does not: eight years of
+        # testing produced no tradeable directional signal for gold, so that tab
+        # reports risk only.
         st.caption(
-            "DJIA · NASDAQ-100 · S&P500 — "
-            "Multi-factor scoring: Technical 38% | Fundamental 30% | Sentiment 18% | Macro 14%"
+            "**US Stocks** · DJIA · NASDAQ-100 · S&P500 — multi-factor scoring "
+            "(Technical 38% | Fundamental 30% | Sentiment 18% | Macro 14%)  \n"
+            "**Short Candidates** - downtrend-continuation model, scored separately from the long score  \n"
+            "**Gold** · XAUUSD — risk &amp; volatility, no directional signal"
         )
     with col_date:
         st.metric("Today", datetime.now().strftime("%b %d, %Y"))
@@ -1357,15 +1345,38 @@ def main():
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab6, tab2, tab3, tab4, tab5 = st.tabs([
         "📈 Daily Rankings",
+        "📉 Short Candidates",
         "🔍 Stock Search",
         "🏭 Sector Browser",
         "📋 Watch List",
+        "🥇 Gold Risk",
     ])
+
+    # EXECUTION ORDER MATTERS, TAB ORDER DOES NOT.
+    # st.tabs is not lazy: every `with tabN:` block runs server-side on each
+    # rerun, and the browser merely shows/hides them. Streamlit streams elements
+    # as the script executes, so whatever runs FIRST appears first — while the
+    # visual position stays fixed by the st.tabs([...]) list above.
+    #
+    # Gold needs ~3s (two yfinance calls); the stock universe needs 3-4 minutes
+    # cold. Rendering gold first means it is usable immediately instead of
+    # waiting behind 101 tickers it has nothing to do with.
+    with tab5:
+        # Risk/volatility only — the gold research produced no tradeable
+        # directional signal, so this tab deliberately emits none.
+        from gold.tab import show_gold_tab
+        show_gold_tab()
 
     with tab1:
         show_daily_tab(tickers, top_n, macro_flags)
+
+    with tab6:
+        # Runs after tab1 on purpose: both screens share the batch-quote and
+        # fundamentals caches, so by the time this executes they are warm and
+        # the short screen costs only its own 1y price history.
+        show_short_tab(tickers, top_n)
 
     with tab2:
         show_search_tab(macro_flags)

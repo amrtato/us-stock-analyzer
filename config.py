@@ -19,6 +19,11 @@ def _secret(key: str, default: str = "") -> str:
 ANTHROPIC_API_KEY = _secret("ANTHROPIC_API_KEY")
 NEWS_API_KEY      = _secret("NEWS_API_KEY")
 ALPHA_VANTAGE_KEY = _secret("ALPHA_VANTAGE_KEY")
+# Massive (formerly Polygon.io) — true XAU/USD spot with live bid/ask, and the
+# only gold feed here that works from Azure. POLYGON_API_KEY is accepted as an
+# alias because the credential is literally the same Polygon key, already in use
+# by the trading-platform project.
+MASSIVE_API_KEY   = _secret("MASSIVE_API_KEY") or _secret("POLYGON_API_KEY")
 
 # ── Stock Universe ─────────────────────────────────────────────────────────────
 
