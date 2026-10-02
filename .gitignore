@@ -45,3 +45,5 @@ Thumbs.db
 gold/data/
 gold/.gold_*.csv
 gold/.gold_1h.csv
+.crypto_panel.csv
+.crypto_panel_wide.csv

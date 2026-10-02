@@ -64,6 +64,7 @@ from scoring.scorer import build_stock_score, rank_stocks, StockScore
 SCORE_TTL = 1800   # 30 min - prices and scores
 FUND_TTL  = 3600   # 1 hr  - fundamentals move far more slowly
 from shorts.tab import show_short_tab
+from crypto.tab import show_crypto_tab
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -1391,6 +1392,8 @@ def main():
             tickers = [t.strip().upper() for t in custom.split(",") if t.strip()]
 
         top_n = st.slider("Top N stocks to show", 5, 20, 10)
+        crypto_n = st.slider("Crypto candidates per side", 10, 20, 10,
+                             help="Shown on each of the long and short lists")
 
         st.divider()
         st.subheader("📡 Macro Regime Flags")
@@ -1431,6 +1434,7 @@ def main():
             "**US Stocks** · DJIA · NASDAQ-100 · S&P500 — multi-factor scoring "
             "(Technical 38% | Fundamental 30% | Sentiment 18% | Macro 14%)  \n"
             "**Short Candidates** - downtrend-continuation model, scored separately from the long score  \n"
+            "**Crypto** - daily long/short trend ranking across liquid USD pairs  \n"
             "**Gold** · XAUUSD — risk &amp; volatility, no directional signal"
         )
     with col_date:
@@ -1439,9 +1443,10 @@ def main():
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab1, tab6, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab6, tab7, tab2, tab3, tab4, tab5 = st.tabs([
         "📈 Daily Rankings",
         "📉 Short Candidates",
+        "₿ Crypto L/S",
         "🔍 Stock Search",
         "🏭 Sector Browser",
         "📋 Watch List",
@@ -1471,6 +1476,11 @@ def main():
         # fundamentals caches, so by the time this executes they are warm and
         # the short screen costs only its own 1y price history.
         show_short_tab(tickers, top_n)
+
+    with tab7:
+        # Independent of the equity universe - its own feed (Massive crypto) and
+        # its own 24/7 calendar, so nothing here shares the stock pipeline.
+        show_crypto_tab(crypto_n)
 
     with tab2:
         show_search_tab(macro_flags)
