@@ -319,6 +319,14 @@ def _live_block():
             elif status == "STOPPED":
                 st.error("🛑 **Stopped out** at the fixed stop.")
 
+            pers = signal_state.persistence()
+            if pers.get("durable") is False:
+                st.caption(
+                    "⚠️ Signal is held in memory only — the state file could not be "
+                    "written, so a server restart will issue a fresh signal at the "
+                    "price at that moment. Levels still hold across page refreshes."
+                )
+
             if sig.get("history"):
                 with st.expander(f"Signal history ({len(sig['history'])})"):
                     hist = pd.DataFrame([{

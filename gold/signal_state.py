@@ -42,10 +42,44 @@ from zoneinfo import ZoneInfo
 log = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
-STATE_PATH = Path.home() / ".aurum_gold_signal.json"
 MAX_HISTORY = 20
 
+
+def _default_path() -> Path:
+    """Where to persist. Azure first, home second, env override always wins.
+
+    On App Service, /home is the persistent share and the documented place for
+    app data; Path.home() does NOT reliably resolve there. Getting this wrong
+    was observed in production: the file silently failed to persist, so every
+    Streamlit rerun re-issued a signal at the current price - the precise drift
+    this module exists to eliminate, just at a coarser interval.
+    """
+    import os
+    env = os.getenv("GOLD_SIGNAL_PATH")
+    if env:
+        return Path(env)
+    azure = Path("/home/data")
+    try:
+        if Path("/home").is_dir():
+            azure.mkdir(parents=True, exist_ok=True)
+            return azure / "aurum_gold_signal.json"
+    except OSError:
+        pass
+    return Path.home() / ".aurum_gold_signal.json"
+
+
+STATE_PATH = _default_path()
+
 _lock = threading.Lock()
+
+# IN-PROCESS STATE IS THE PRIMARY STORE; THE FILE IS ONLY DURABILITY.
+#
+# A file that cannot be written must not cause a re-issue, because a re-issue
+# silently restores floating levels. Holding the state in memory means the
+# signal survives every rerun for the life of the process no matter what the
+# filesystem does; the file then adds survival across restarts, best-effort.
+_mem: dict | None = None
+_persist_ok: bool | None = None
 
 # Terminal states. ACTIVE is the only one whose levels are still in play.
 ACTIVE, TP1, TP2, STOPPED, FLIPPED = "ACTIVE", "TP1_HIT", "TP2_HIT", "STOPPED", "FLIPPED"
@@ -56,27 +90,45 @@ def _now() -> datetime:
 
 
 def _load() -> dict:
+    global _mem
+    if _mem is not None:                       # memory wins; see note above
+        return _mem
     try:
         if STATE_PATH.exists():
             with STATE_PATH.open(encoding="utf-8") as fh:
                 d = json.load(fh)
             d.setdefault("active", None)
             d.setdefault("history", [])
+            _mem = d
             return d
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("gold signal state unreadable (%s) — starting fresh", exc)
-    return {"active": None, "history": []}
+    _mem = {"active": None, "history": []}
+    return _mem
 
 
 def _save(state: dict) -> None:
+    global _mem, _persist_ok
+    state["history"] = state.get("history", [])[-MAX_HISTORY:]
+    _mem = state                               # always, even if the file fails
     try:
-        state["history"] = state.get("history", [])[-MAX_HISTORY:]
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = STATE_PATH.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=1)
         tmp.replace(STATE_PATH)        # atomic, so a crash cannot truncate it
+        _persist_ok = True
     except OSError as exc:
-        log.warning("could not persist gold signal state: %s", exc)
+        if _persist_ok is not False:
+            log.warning("gold signal not durable (%s) — in-memory only, "
+                        "a restart will re-issue", exc)
+        _persist_ok = False
+
+
+def persistence() -> dict:
+    """So the UI can say whether the signal survives a restart, rather than
+    implying durability it does not have."""
+    return {"path": str(STATE_PATH), "durable": _persist_ok}
 
 
 # Minutes to wait before re-issuing in the SAME direction after a stop-out.
@@ -242,6 +294,7 @@ def update(bias: str, dirn: int, price: float, risk: float, atr: float,
 def reset() -> None:
     """Drop the active signal (not the history). For manual intervention."""
     with _lock:
+        global _mem
         state = _load()
         if state.get("active"):
             s = state["active"]
