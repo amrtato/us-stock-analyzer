@@ -81,10 +81,14 @@ from styles import inject as _inject_css
 _inject_css()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
+# One ETF per CANONICAL_SECTORS entry. Real Estate (XLRE) was missing, so the
+# rotation panel silently showed 9 of 10 sectors while SECTOR_ICONS listed all
+# ten - a reader had no way to tell the sector was absent rather than flat.
 SECTOR_ETFS = {
     "Technology": "XLK", "Financials": "XLF", "Healthcare": "XLV",
     "Consumer": "XLY",   "Industrials": "XLI", "Energy": "XLE",
     "Communication": "XLC", "Materials": "XLB", "Utilities": "XLU",
+    "Real Estate": "XLRE",
 }
 
 SECTOR_ICONS = {
@@ -345,11 +349,32 @@ def get_watchlist_quotes(tickers: tuple) -> dict:
 
 
 def analyse_ticker(ticker, news_map, quotes):
+    """Score one ticker, or return None when there is nothing real to score.
+
+    TWO BUGS LIVED IN THE PRICE LINE.
+
+    1. `quote.get("price", fallback)` only uses the fallback when the KEY IS
+       ABSENT. A quote of {"price": 0} - which is what a failed lookup returns -
+       hands back 0, so the last-close fallback never ran. The symptom was a
+       stock rendered at $0.00 with Entry/Stop/T1/T2 all $0.00 and R:R 0.0x,
+       while the chart beside it showed real candles.
+
+    2. Nothing rejected a symbol that does not exist. A typo was scored, graded,
+       given trade levels, and counted into "Stocks Analysed" and the universe
+       average - so one bad character silently moved an aggregate.
+
+    A price of zero is not a price. No price and no history means no score.
+    """
     try:
         df        = get_price_history(ticker, bkt=_key(SCORE_TTL))
         fund_data = get_fundamentals(ticker, bkt=_key(FUND_TTL))
-        quote     = quotes.get(ticker, {})
-        price     = quote.get("price", float(df["Close"].iloc[-1]) if not df.empty else 0)
+        quote     = quotes.get(ticker, {}) or {}
+
+        price = quote.get("price") or 0          # treat 0/None alike
+        if price <= 0 and not df.empty:
+            price = float(df["Close"].iloc[-1])  # fall back to the last close
+        if price <= 0 or df.empty:
+            return None                          # nothing real to score
 
         tech_r  = analyse_technical(ticker, df)
         fund_r  = analyse_fundamental(ticker, fund_data, price)
@@ -637,18 +662,30 @@ def build_radar(stock: StockScore) -> go.Figure:
 
 
 def build_sector_chart(sector_returns: dict) -> go.Figure:
-    sectors = list(sector_returns.keys())
-    returns = [sector_returns[s] for s in sectors]
+    """Horizontal bars whose LENGTH encodes the return.
+
+    The x values used to be pre-formatted strings (f"{r:+.1f}%"), which Plotly
+    treats as categories: every bar got an equal slot, so a +0.0% sector could
+    out-draw a +0.5% one and the axis ticks were category labels rather than a
+    scale. The numbers on screen were right and the picture was meaningless,
+    which is the worst combination - it reads as data.
+    """
+    ordered = sorted(sector_returns.items(), key=lambda kv: kv[1])
+    sectors = [k for k, _ in ordered]
+    returns = [float(v) for _, v in ordered]
     fig = go.Figure(go.Bar(
-        x=[f"{r:+.1f}%" for r in returns], y=sectors,
-        orientation="h",
+        x=returns, y=sectors, orientation="h",
         marker_color=["#00ff88" if r >= 0 else "#ff4444" for r in returns],
         text=[f"{r:+.1f}%" for r in returns], textposition="outside",
+        cliponaxis=False,            # value labels may sit outside the plot area
+        hovertemplate="%{y}: %{x:+.2f}%<extra></extra>",
     ))
     fig.update_layout(
-        template="plotly_dark", height=280,
-        margin=dict(l=0, r=40, t=10, b=0),
-        xaxis=dict(title="1-Day Return %"), showlegend=False,
+        template="plotly_dark", height=300,
+        margin=dict(l=0, r=70, t=10, b=0),   # room for the outside labels
+        xaxis=dict(title="1-Day Return %", tickformat="+.1f", ticksuffix="%",
+                   zeroline=True, zerolinecolor="#555"),
+        showlegend=False, uniformtext=dict(mode="hide", minsize=9),
     )
     return fig
 
@@ -820,6 +857,13 @@ def show_daily_tab(tickers, top_n, macro_flags):
     if not scores:
         st.error("No data returned. Check your internet connection.")
         return
+
+    # A symbol that produced no price is dropped by analyse_ticker rather than
+    # scored at $0.00. Say which ones, otherwise "Stocks Analysed: 4" when you
+    # typed 5 looks like a bug in the count rather than a rejected ticker.
+    skipped = [t for t in tickers if t not in {s.ticker for s in scores}]
+    if skipped:
+        st.warning(f"⚠️ Skipped (no price or history): {', '.join(skipped)}")
 
     ranked        = rank_stocks(scores, top_n)
     sector_returns = get_sector_returns()
@@ -1388,8 +1432,16 @@ def main():
         elif universe_choice == "S&P500 Top (40)":
             tickers = SP500_TOP
         else:
-            custom  = st.text_input("Tickers (comma-separated)", "AAPL,NVDA,MSFT,GOOGL,META,AMZN")
-            tickers = [t.strip().upper() for t in custom.split(",") if t.strip()]
+            custom = st.text_input("Tickers (comma-separated)",
+                                   "AAPL,NVDA,MSFT,GOOGL,META,AMZN")
+            # dict.fromkeys preserves order while removing repeats: "aapl, AAPL"
+            # used to analyse Apple twice, which put it at rank 1 AND 2 and made
+            # the bar chart show 5 values under 4 labels (Plotly merges equal
+            # categories). It also inflated "Stocks Analysed".
+            raw = [t.strip().upper() for t in custom.split(",") if t.strip()]
+            tickers = list(dict.fromkeys(raw))
+            if len(raw) != len(tickers):
+                st.caption(f"↩️ {len(raw) - len(tickers)} duplicate(s) removed")
 
         top_n = st.slider("Top N stocks to show", 5, 20, 10)
         crypto_n = st.slider("Crypto candidates per side", 10, 20, 10,

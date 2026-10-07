@@ -112,7 +112,7 @@ def _vol_chart(sel_hour: int) -> go.Figure:
     return fig
 
 
-@st.fragment(run_every="1s")
+@st.fragment(run_every="2s")
 def _live_block():
     """
     Live price + trade levels, re-running on a 1s timer.
@@ -122,14 +122,22 @@ def _live_block():
     autorefresh would re-execute the stock pipeline every second and reset the
     cost slider constantly.
 
-    WHY 1s AND NOT FASTER
-        The feed delivers ~1.6 ticks/sec, so the price itself is never more than
-        a fraction of a second old once the WebSocket is up — reading it costs
-        nothing, it is already in memory. The limit is Streamlit: each rerun
-        re-renders the fragment server-side and ships it to the browser, so
-        sub-second timers buy flicker rather than information. True per-tick
-        repainting would require the socket in the BROWSER, which on a public
-        site means handing the API key to every visitor.
+    WHY 2s, NOT 1s AND NOT FASTER
+        Measured, after a QA pass reported the app "re-running every second":
+        the MAIN SCRIPT is not re-running at all - the sidebar's "Last refresh"
+        stamp, which is datetime.now() evaluated in the main run, held a single
+        value across 16s while this fragment ticked 8 times. What does happen is
+        that every fragment delta makes Streamlit's frontend re-render a broad
+        slice of the element tree: 218 sidebar DOM mutations in 16s, for content
+        that never changed. That churn is what makes elements look stale, jumps
+        the scroll position and eats keystrokes.
+
+        So the rate is the lever, and 1s was buying nothing: Massive's REST quote
+        refreshes about every 2s, so a 1s timer redrew the same number half the
+        time. 2s matches the upstream cadence and halves the churn.
+
+        True per-tick repainting would need the socket in the BROWSER, which on a
+        public site means handing the API key to every visitor.
     """
     _ensure_stream()
     d = _hourly()          # fresh every rerun, not frozen at page load
@@ -236,7 +244,6 @@ def _live_block():
         p1, p2 = st.columns([1, 2])
         with p1:
             st.markdown(
-                f'<style>@keyframes gpulse{{0%,100%{{opacity:1}}50%{{opacity:.25}}}}</style>'
                 f'<div style="background:#1e1e2e;border-radius:10px;padding:16px 20px;'
                 f'border-left:4px solid {src_col};">'
                 f'<div style="font-size:.75em;color:{src_col};text-transform:uppercase;'
@@ -410,7 +417,14 @@ def _live_block():
 
 
 
+_PULSE_CSS = ("<style>@keyframes gpulse{0%,100%{opacity:1}50%{opacity:.25}}</style>")
+
+
 def show_gold_tab() -> None:
+    # Injected once per page, not once per fragment tick. It was inside the
+    # live block, so a <style> element carrying one constant rule was being
+    # recreated every refresh - pure DOM churn for no visual difference.
+    st.markdown(_PULSE_CSS, unsafe_allow_html=True)
     st.caption(
         f"XAU/USD · live feed: Massive (spot, streaming bid/ask) · "
         f"research basis: {R.H1_BARS:,} hourly bars ({R.H1_YEARS:.0f}y) + "

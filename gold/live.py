@@ -397,7 +397,15 @@ def paper_record(d: pd.DataFrame, start: str) -> dict:
     t["net_lot"] = t["net_oz"] * CONTRACT_OZ
     t["win"] = t["net_oz"] > 0
 
-    eq = np.cumsum(t["net_lot"].to_numpy())
+    # Equity curve must START AT ZERO.
+    #
+    # It was np.cumsum(pnl), whose first element is already the first trade's
+    # P&L - so np.maximum.accumulate treated an ALREADY-LOSING value as the
+    # peak. With 19 straight losers that reported a -$360 drawdown against a
+    # -$380 net, which is arithmetically impossible: with no winners the
+    # drawdown cannot be smaller than the loss. Prepending the opening balance
+    # makes the peak the starting equity, as it must be.
+    eq = np.concatenate(([0.0], np.cumsum(t["net_lot"].to_numpy())))
     dd = eq - np.maximum.accumulate(eq)
     run = best = 0
     for w in t["win"]:
