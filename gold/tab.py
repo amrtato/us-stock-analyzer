@@ -24,12 +24,25 @@ import streamlit as st
 
 from gold import massive
 from gold import research as R
+from gold import signal_state
 from gold.live import (fetch_hourly, current_state, paper_record,
+                       is_spot_history,
                        signal_card, get_spot, market_status)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _hourly():
+    """Hourly bars, re-read every 2 minutes.
+
+    The TTL used to be 1800s and was MEANINGLESS: the frame was fetched once in
+    the parent script run and handed to the fragment as an argument, and a
+    st.fragment re-runs only itself - so it kept the frame it was born with
+    forever. The EMAs, and therefore the whole bias, were frozen at page-load
+    until someone refreshed the browser.
+
+    The fragment now calls this itself. 120s costs one Massive request per two
+    minutes and means a bar close shows up almost immediately.
+    """
     return fetch_hourly("2y")
 
 
@@ -100,7 +113,7 @@ def _vol_chart(sel_hour: int) -> go.Figure:
 
 
 @st.fragment(run_every="1s")
-def _live_block(d):
+def _live_block():
     """
     Live price + trade levels, re-running on a 1s timer.
 
@@ -119,14 +132,22 @@ def _live_block(d):
         site means handing the API key to every visitor.
     """
     _ensure_stream()
-    sc = signal_card(d)
+    d = _hourly()          # fresh every rerun, not frozen at page load
     q = _spot()
+    sc = signal_card(d, live_price=q.get("price"))
     if sc.get("ok"):
-        # Re-anchor every level onto the tradeable price. The hourly frame is
-        # GC=F futures, which sits ~$62 above spot — levels left on the futures
-        # scale would be unfillable. Trend and stop DISTANCE survive the shift
-        # (futures/spot hourly changes correlate 0.9979); only the level moves.
-        if q.get("price"):
+        # Basis re-anchoring, ONLY on the futures fallback.
+        #
+        # This used to run unconditionally, from when fetch_hourly() served GC=F
+        # at ~$62 above spot. It now serves real Massive spot, and leaving the
+        # shift in was doing active harm: it moved the EMAs by the SAME delta as
+        # price, so price-vs-EMA200 could not respond to live price at all. The
+        # bias was pinned to the last hourly close no matter what gold did.
+        #
+        # On the futures fallback the shift is still needed to make levels
+        # fillable, and there it genuinely does freeze the live comparison -
+        # an honest limitation of a fallback, not the normal path.
+        if q.get("price") and not is_spot_history():
             shift = q["price"] - sc["price"]
             for kk in ("price", "entry", "stop", "tp1", "tp2", "tight_stop"):
                 sc[kk] += shift
@@ -241,16 +262,81 @@ def _live_block(d):
                 unsafe_allow_html=True,
             )
 
-        lv = st.columns(5)
-        lv[0].metric("Entry", f"${sc['entry']:,.2f}", "market")
-        lv[1].metric("Stop loss", f"${sc['stop']:,.2f}",
-                     f"{-abs(sc['risk_usd']):.2f} · 1.5×ATR", delta_color="inverse")
-        lv[2].metric("Take profit 1", f"${sc['tp1']:,.2f}",
-                     f"+{abs(sc['tp1']-sc['entry']):.2f} · 2R")
-        lv[3].metric("Take profit 2", f"${sc['tp2']:,.2f}",
-                     f"+{abs(sc['tp2']-sc['entry']):.2f} · 3R")
-        lv[4].metric("Risk / 0.01 lot", f"${sc['risk_usd']:.2f}",
-                     f"vol {sc['vol_mult']:.2f}×")
+        # ── LATCHED SIGNAL ───────────────────────────────────────────────
+        # These levels are FIXED at issue. They are deliberately not recomputed
+        # from the live price: a stop that slides with the market can never be
+        # said to have been hit, which made the previous card unfalsifiable.
+        mkt_open = market_status()["open"]
+        sig = signal_state.update(
+            bias=sc["bias"], dirn=sc["dirn"], price=sc["price"],
+            risk=abs(sc["entry"] - sc["stop"]), atr=sc.get("atr", 0.0),
+            market_open=mkt_open,
+        )
+
+        if not sig.get("ok"):
+            st.info(f"📌 **No active signal** — {sig.get('reason', 'unavailable')}.")
+        else:
+            status = sig["status"]
+            s_col = {"ACTIVE": "#00aaff", "TP1_HIT": "#00ff88",
+                     "TP2_HIT": "#00ff88", "STOPPED": "#ff4444",
+                     "FLIPPED": "#ffd700"}.get(status, "#aaa")
+            d_col = "#00ff88" if sig["dirn"] > 0 else "#ff4444"
+            side = "LONG" if sig["dirn"] > 0 else "SHORT"
+            age = sig["age_min"]
+            age_s = f"{age:.0f}m ago" if age < 90 else f"{age / 60:.1f}h ago"
+
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:14px;margin:4px 0 10px 0;">'
+                f'<span class="status-pill" style="background:{d_col}22;color:{d_col};'
+                f'border:1.5px solid {d_col};">📌 {side} SIGNAL</span>'
+                f'<span class="status-pill" style="background:{s_col}22;color:{s_col};'
+                f'border:1.5px solid {s_col};">{status.replace("_", " ")}</span>'
+                f'<span style="color:#888;font-size:.85em;">levels fixed at issue · '
+                f'{sig["issued_dt"]:%H:%M:%S} ET · {age_s}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+            lv = st.columns(5)
+            lv[0].metric("Entry (fixed)", f"${sig['entry']:,.2f}",
+                         f"{sig['move']:+.2f} now", delta_color="normal")
+            lv[1].metric("Stop loss (fixed)", f"${sig['stop']:,.2f}",
+                         f"{sig['to_stop']:.2f} away", delta_color="off")
+            lv[2].metric("Take profit 1", f"${sig['tp1']:,.2f}",
+                         f"{sig['to_tp1']:.2f} away · 2R", delta_color="off")
+            lv[3].metric("Take profit 2", f"${sig['tp2']:,.2f}",
+                         f"{sig['to_tp2']:.2f} away · 3R", delta_color="off")
+            lv[4].metric("Unrealised", f"{sig['move_r']:+.2f} R",
+                         f"${sig['move'] * 100 * 0.01:+,.2f} / 0.01 lot")
+
+            if "ISSUED" in sig.get("events", []):
+                st.success(f"🆕 New signal issued at ${sig['entry']:,.2f} — "
+                           f"these four levels are now fixed until it resolves.")
+            if "FLIPPED" in sig.get("events", []):
+                st.warning("🔄 **Bias flipped** — the previous signal was closed and a "
+                           "new one issued. The old levels were not edited; see history.")
+            if status == "TP1_HIT":
+                st.success("🎯 **Target 1 hit.** Levels unchanged; TP2 still live.")
+            elif status == "STOPPED":
+                st.error("🛑 **Stopped out** at the fixed stop.")
+
+            if sig.get("history"):
+                with st.expander(f"Signal history ({len(sig['history'])})"):
+                    hist = pd.DataFrame([{
+                        "Issued": h["issued_at"][11:19],
+                        "Side": "LONG" if h["dirn"] > 0 else "SHORT",
+                        "Entry": f"${h['entry']:,.2f}",
+                        "Stop": f"${h['stop']:,.2f}",
+                        "TP1": f"${h['tp1']:,.2f}",
+                        "Outcome": h["status"].replace("_", " "),
+                        "Best": f"{h.get('mfe', 0):+.2f}",
+                        "Worst": f"{h.get('mae', 0):+.2f}",
+                    } for h in sig["history"]])
+                    st.dataframe(hist, width="stretch", hide_index=True)
+                    st.caption(
+                        "Every row kept the levels it was issued with. 'Best' and 'Worst' "
+                        "are the furthest the price travelled for and against the entry — "
+                        "shown because an outcome alone hides how close the other side came."
+                    )
 
         if not is_spot:
             st.error(
@@ -334,7 +420,7 @@ def show_gold_tab() -> None:
     s = current_state(d)
     col, label, dot = R.vol_state(s["vol_x"])
 
-    _live_block(d)
+    _live_block()
 
     # ── live state ───────────────────────────────────────────────────────────
     st.subheader("📊 Right now")

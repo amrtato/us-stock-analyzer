@@ -267,7 +267,7 @@ def market_status(now: datetime | None = None) -> dict:
     return {"open": True, "reason": "", "reopens": None}
 
 
-def signal_card(d: pd.DataFrame) -> dict:
+def signal_card(d: pd.DataFrame, live_price: float | None = None) -> dict:
     """
     Trade levels for the current bar.
 
@@ -297,7 +297,13 @@ def signal_card(d: pd.DataFrame) -> dict:
         return {"ok": False, "reason": "insufficient price history"}
 
     c = d["Close"]
-    price = float(c.iloc[-1])
+    # Direction is compared at the LIVE price when one is available, not at the
+    # last hourly close. Using the close meant the bias could not change until a
+    # new bar printed - up to an hour late, and in practice never, because the
+    # frame itself was stale. Both series are spot, so they are directly
+    # comparable; the EMAs are not shifted.
+    bar_close = float(c.iloc[-1])
+    price = float(live_price) if live_price else bar_close
     ema200 = float(c.ewm(span=200, adjust=False).mean().iloc[-1])
     ema50 = float(c.ewm(span=50, adjust=False).mean().iloc[-1])
     a = float(atr(d).iloc[-1])
@@ -310,6 +316,10 @@ def signal_card(d: pd.DataFrame) -> dict:
         bias, dirn, icon = "MIXED", +1 if price > ema200 else -1, "🟡"
 
     risk = 1.5 * a
+    # NOTE: these are the levels a signal would be issued AT right now. They are
+    # not what the card displays - gold/signal_state.py latches the levels at
+    # issue and keeps them fixed until the signal resolves, because a level that
+    # moves with price cannot be said to have been hit.
     stop = price - dirn * risk
     tp1 = price + dirn * 2.0 * risk
     tp2 = price + dirn * 3.0 * risk
