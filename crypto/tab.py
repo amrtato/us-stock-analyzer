@@ -20,6 +20,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from crypto import data as cd
+from signals import state as signal_state
 from crypto.scoring import BENCH, compute_features, rank_latest, score_cross_section
 
 # From backtest_crypto.py, 2026-10-02. Do not soften these.
@@ -71,6 +72,49 @@ signal.
 
 LOOKBACK_DAYS = 220          # enough for EMA100 plus the 30-day features
 
+# Holding period the model was actually tested over (backtest_crypto.py).
+HORIZON_DAYS = 14
+# A stop-out waits this long before the same side re-issues on that pair. Far
+# longer than gold's 60min because the tested horizon here is 14 days, not
+# intraday - a 1h cooldown on a 2-week thesis would re-enter inside the noise.
+CRYPTO_COOLDOWN_MIN = 24 * 60
+
+
+def _risk_unit(price: float, vol30_pct: float) -> float:
+    """One standard deviation over the tested 14-day horizon, in price terms.
+
+    Crypto volatility spans ~14% to 200% annualised across this universe, so a
+    fixed percentage stop is meaningless - the same stop is noise on one pair
+    and unreachable on another. Scaling from each asset's own vol is the only
+    thing that makes the levels comparable, and it is the same number already
+    shown in the "1 sigma / 14d" column so the card cannot disagree with itself.
+    """
+    if not price or not vol30_pct or vol30_pct <= 0:
+        return 0.0
+    return price * (vol30_pct / 100.0) * (HORIZON_DAYS / 365.0) ** 0.5
+
+
+def _latch(rows, side: str) -> dict:
+    """Issue/advance a latched signal for every row, in ONE load/save.
+
+    Crypto trades 24/7, so market_open is always True - there is no session to
+    gate on, unlike gold.
+    """
+    dirn = 1 if side == "long" else -1
+    bias = "BULLISH" if dirn > 0 else "BEARISH"
+    items = []
+    for _, r in rows.iterrows():
+        risk = _risk_unit(r["close"], r.get("vol30"))
+        if risk <= 0:
+            continue
+        items.append({"key": r["ticker"], "bias": bias, "dirn": dirn,
+                      "price": float(r["close"]), "risk": risk,
+                      "atr": risk})
+    if not items:
+        return {}
+    return signal_state.update_many(items, market_open=True,
+                                    cooldown_min=CRYPTO_COOLDOWN_MIN)
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _panel(top_candidates: int = 300) -> pd.DataFrame:
@@ -113,9 +157,11 @@ def _px(v: float) -> str:
     return f"${v:,.9f}"
 
 
-def _fmt(rows: pd.DataFrame, side: str) -> pd.DataFrame:
+def _fmt(rows: pd.DataFrame, side: str, sigs: dict | None = None) -> pd.DataFrame:
+    sigs = sigs or {}
     out = []
     for i, (_, r) in enumerate(rows.iterrows(), 1):
+        sig = sigs.get(r["ticker"], {})
         sym = str(r["ticker"]).replace("X:", "").replace("USD", "")
         px = r["close"]
         out.append({
@@ -132,6 +178,18 @@ def _fmt(rows: pd.DataFrame, side: str) -> pd.DataFrame:
             "1σ / 14d": (_px(px * (r["vol30"] / 100) * (14 / 365) ** 0.5)
                          if pd.notna(r["vol30"]) else "—"),
             "$ vol/day": f"${r['dollar_volume'] / 1e6:,.1f}M",
+            # Fixed at issue. Deliberately NOT recomputed from the live price:
+            # a stop that slides with the market can never be said to have been
+            # hit, which is what made the gold card unfalsifiable before.
+            "Entry (fixed)": _px(sig.get("entry")) if sig.get("ok") else "—",
+            "Stop": _px(sig.get("stop")) if sig.get("ok") else "—",
+            "TP1": _px(sig.get("tp1")) if sig.get("ok") else "—",
+            "TP2": _px(sig.get("tp2")) if sig.get("ok") else "—",
+            "P&L": (f"{sig['move_r']:+.2f} R" if sig.get("ok") else "—"),
+            "Status": (sig.get("status", "").replace("_", " ")
+                       if sig.get("ok") else "cooling off"),
+            "Age": (f"{sig['age_min']:.0f}m" if sig.get("ok") and sig["age_min"] < 90
+                    else f"{sig['age_min'] / 60:.1f}h" if sig.get("ok") else "—"),
         })
     return pd.DataFrame(out)
 
@@ -203,19 +261,51 @@ def show_crypto_tab(n: int = 10) -> None:
 
     st.divider()
     c1, c2 = st.columns(2)
+    long_sigs = _latch(longs, "long")
+    short_sigs = _latch(shorts, "short")
+
     with c1:
         st.markdown(f"### 🟢 Long candidates — top {n}")
-        st.caption("Strongest trend + relative strength vs BTC, volatility-adjusted.")
-        df = _fmt(longs, "long")
+        st.caption("Strongest trend + relative strength vs BTC, volatility-adjusted. "
+                   "Levels are fixed at issue and hold until they resolve.")
+        df = _fmt(longs, "long", long_sigs)
         st.dataframe(df.style.map(_colour_side("long"), subset=["7d %", "30d %", "vs BTC"]),
                      width="stretch", hide_index=True, height=min(620, 45 + 35 * len(df)))
     with c2:
         st.markdown(f"### 🔴 Short candidates — bottom {n}")
         st.caption("Weakest trend + underperformance vs BTC. Perpetuals have no "
                    "borrow constraint, so a short here is a true mirror of a long.")
-        df = _fmt(shorts, "short")
+        df = _fmt(shorts, "short", short_sigs)
         st.dataframe(df.style.map(_colour_side("short"), subset=["7d %", "30d %", "vs BTC"]),
                      width="stretch", hide_index=True, height=min(620, 45 + 35 * len(df)))
+
+    # A pair can fall out of the top-N while its signal is still open. Dropping
+    # it from the page would quietly abandon a position the screen had told you
+    # about, so open signals are listed separately rather than lost.
+    shown = set(longs["ticker"]) | set(shorts["ticker"])
+    orphans = {k: v for k, v in signal_state.open_signals("X:").items()
+               if k not in shown}
+    if orphans:
+        with st.expander(f"⚠️ {len(orphans)} open signal(s) no longer in the lists"):
+            st.caption(
+                "These pairs have dropped out of the current top/bottom ranking, but "
+                "their signals were issued and have not resolved. They are kept here "
+                "so a position the screen surfaced does not silently disappear."
+            )
+            last = scored[scored["date"] == scored["date"].max()].set_index("ticker")
+            rows = []
+            for k, sg in orphans.items():
+                live = float(last["close"].get(k, sg["entry"]))
+                mv = (live - sg["entry"]) * sg["dirn"]
+                rows.append({
+                    "Asset": k.replace("X:", "").replace("USD", ""),
+                    "Side": "LONG" if sg["dirn"] > 0 else "SHORT",
+                    "Entry (fixed)": _px(sg["entry"]), "Stop": _px(sg["stop"]),
+                    "TP1": _px(sg["tp1"]), "Live": _px(live),
+                    "P&L": f"{mv / sg['risk']:+.2f} R" if sg.get("risk") else "—",
+                    "Status": sg["status"].replace("_", " "),
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     st.plotly_chart(_spread_chart(longs, shorts), key="crypto_spread")
 
@@ -227,6 +317,11 @@ def show_crypto_tab(n: int = 10) -> None:
         "asset's own 30-day volatility. Crypto vol ranges roughly 40–200% annualised "
         "across this universe, so a fixed percentage stop is meaningless: the same "
         "stop that is wide on BTC is noise on a small-cap altcoin.<br><br>"
+        "<b>The stop and targets were NOT part of the backtest.</b> That test measured "
+        "raw 14-day forward returns with no stop and no target at all, so these levels "
+        "are risk scaffolding sized from each asset's own volatility — not a tested "
+        "exit rule. They are fixed at issue so a level can actually be said to have "
+        "been hit; that makes them falsifiable, not validated.<br><br>"
         "<b>The market was positive on only 47% of 14-day windows</b> despite averaging "
         "+2.36%. The returns come from rare large moves, not consistency — so "
         "position size for a long run of losing windows even when the mean is positive."

@@ -24,7 +24,7 @@ import streamlit as st
 
 from gold import massive
 from gold import research as R
-from gold import signal_state
+from signals import state as signal_state
 from gold.live import (fetch_hourly, current_state, paper_record,
                        is_spot_history,
                        signal_card, get_spot, market_status)

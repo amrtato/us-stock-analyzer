@@ -320,7 +320,7 @@ def signal_card(d: pd.DataFrame, live_price: float | None = None) -> dict:
 
     risk = 1.5 * a
     # NOTE: these are the levels a signal would be issued AT right now. They are
-    # not what the card displays - gold/signal_state.py latches the levels at
+    # not what the card displays - signals/state.py latches the levels at
     # issue and keeps them fixed until the signal resolves, because a level that
     # moves with price cannot be said to have been hit.
     stop = price - dirn * risk
