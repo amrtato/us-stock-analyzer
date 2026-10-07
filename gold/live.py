@@ -12,15 +12,16 @@ DESIGN NOTE — no state.
     serves hourly bars (~2 years), which comfortably covers a paper test begun
     2026-08-07.
 
-SPREAD, AND WHY TWO NUMBERS ARE SHOWN
-    Massive quotes a live interbank bid/ask (~$0.52 typical). That is NOT what
-    you pay: your Exness account measured a $0.20 median. So the COST model
-    keeps using the broker-measured constant from gold/research.py, while the
-    live spread is reported as a market-condition RATIO (live / typical). When
-    the interbank spread trebles, yours widens too — that is the actionable
-    part, not the absolute figure.
+SPREAD
+    The displayed quote and the cost model now come from the SAME place:
+    Massive's live bid/ask, with research.SPREAD_MEDIAN re-measured on that
+    feed (median $0.550 across 7,200 quotes spanning 24h). Previously the card
+    showed this feed's spread while costing trades at a different venue's
+    $0.20 — two instruments on one card. The live spread is also shown as a
+    RATIO against typical, because 3x normal is the actionable fact.
 """
 from __future__ import annotations
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -96,10 +97,12 @@ def current_state(d: pd.DataFrame) -> dict:
 
 
 MT5_SYMBOL = "XAUUSDm"
-MT5_PATHS = (
-    r"C:\Program Files\MetaTrader 5 (AMR)\terminal64.exe",
-    r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe",
-)
+# Local-terminal paths for the GOLD_USE_MT5=1 escape hatch. Broker-agnostic:
+# the live feed is Massive, and this exists only to compare against a local
+# terminal if one happens to be installed. Override with MT5_TERMINAL_PATHS.
+MT5_PATHS = tuple(
+    x for x in os.environ.get("MT5_TERMINAL_PATHS", "").split(os.pathsep) if x
+) or (r"C:\Program Files\MetaTrader 5\terminal64.exe",)
 
 
 def get_spot() -> dict:
@@ -119,11 +122,11 @@ def get_spot() -> dict:
          mean error over 30 days), so it is never called spot. Hourly CHANGES
          still correlate 0.9979, so structure survives even when the level does not.
 
-    MT5 is deliberately NOT in this chain any more. It only ever worked on
-    Windows, and having local read a different source from production is exactly
-    how a dashboard starts lying about what production shows. Set
-    GOLD_USE_MT5=1 to put your broker's own tick back at the front for
-    comparison; it stays off by default.
+    A local MT5 terminal is deliberately NOT in this chain. It only ever worked
+    on Windows, and having local read a different source from production is
+    exactly how a dashboard starts lying about what production shows. Set
+    GOLD_USE_MT5=1 to put a local terminal's tick at the front for comparison;
+    it stays off by default.
 
     PAXG was removed. Binance geo-blocks Ontario (the app runs in Azure Canada
     Central) and the tokenised-ounce premium drifted to $13.91 against a
@@ -223,7 +226,7 @@ def _mt5_tick() -> dict | None:
                 return {
                     "price": (t.bid + t.ask) / 2, "bid": t.bid, "ask": t.ask,
                     "spread": t.ask - t.bid, "is_spot": True, "two_sided": True,
-                    "source": f"MT5 {MT5_SYMBOL} — your broker's tick",
+                    "source": f"local terminal {MT5_SYMBOL} — comparison only",
                     "ts": datetime.fromtimestamp(t.time, tz=ET),
                 }
         except Exception:

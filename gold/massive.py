@@ -43,19 +43,19 @@ BASE = "https://api.polygon.io"
 PAIR = "XAU/USD"
 TICKER = "C:XAUUSD"
 
-# Typical interbank spread on this feed, from 20 consecutive pulls on
-# 2026-10-01 ~14:30 ET: min 0.45, mean 0.52, max 0.56.
+# Typical spread on this feed. Properly measured now: 7,200 raw quotes across
+# all 24 hours of 2026-10-06 (measure_spread.py), median $0.550.
 #
-# READ THIS BEFORE USING IT AS A COST INPUT. It is NOT what you pay. Your Exness
-# account was measured at a $0.20 median (research.SPREAD_MEDIAN), and this feed
-# is an aggregated interbank quote running ~2.6x that. It is used only as a
-# STRESS RATIO: live / typical. When this feed's spread trebles, your broker's
-# will widen too, and that is the signal worth acting on.
+# This supersedes an earlier 0.52 taken from 20 pulls inside ONE minute of the
+# US afternoon - close by luck, but a snapshot rather than a distribution, and
+# spreads here are strongly session-dependent (Asian open runs a $0.715 median
+# against London's $0.500).
 #
-# Caveat: 20 samples inside one minute of the US afternoon is not a session
-# profile. Recalibrate across London/NY/Asia before leaning on the ratio hard.
-SPREAD_TYPICAL = 0.52
-SPREAD_SAMPLE_NOTE = "20 pulls, 2026-10-01 14:30 ET"
+# It is now also the COST BASIS in research.SPREAD_MEDIAN. Previously the page
+# displayed this feed's bid/ask while costing trades at a different broker's
+# $0.20 - two different instruments on one card.
+SPREAD_TYPICAL = 0.550
+SPREAD_SAMPLE_NOTE = "7,200 quotes across 24h, 2026-10-06"
 
 
 def _key() -> str | None:

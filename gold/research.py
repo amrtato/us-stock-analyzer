@@ -2,8 +2,10 @@
 Frozen research constants for the Gold tab.
 
 WHY THESE ARE CONSTANTS, NOT LIVE QUERIES
-    The volatility profile and spread statistics were measured from MT5 exports
-    (47,161 H1 bars / 1,411,140 M1 bars). MetaTrader5's Python API needs a local
+    The volatility profile was measured from a historical broker tick export
+    (47,161 H1 bars / 1,411,140 M1 bars). Spread statistics are NO LONGER from
+    that export - they are re-measured on the Massive feed this page quotes; see
+    SPREAD_MEDIAN below. MetaTrader5's Python API needs a local
     Windows terminal, so it cannot run on Azure Linux. These are also not the kind
     of numbers that should be recomputed per page load — an 8-year seasonal profile
     is a research finding with a provenance, not a live quote. Re-derive them by
@@ -21,15 +23,31 @@ MEASURED_AT = "2026-08-07"
 # Provenance of the RESEARCH constants below. The LIVE feed is a separate
 # thing (Massive XAU/USD — see gold/massive.py); this string must not be
 # read as naming the current price source, so it says "research" outright.
-SOURCE = "research: MT5 · Exness XAUUSDm"
+SOURCE = "research: 8y hourly / 4y minute broker tick export"
 H1_BARS, H1_YEARS = 47_161, 8.0
 M1_BARS, M1_YEARS = 1_411_140, 4.0
 
-# Broker-measured spread, XAUUSDm. digits=3, point=0.001, contract=100 oz.
-SPREAD_MEDIAN = 0.20
-SPREAD_P90 = 0.24
-SPREAD_P99 = 0.364
-SPREAD_MAX = 4.00
+# ── Spread, measured on the feed actually quoted on this page ────────────────
+# 7,200 raw quotes sampled across all 24 hours of 2026-10-06 (see
+# measure_spread.py). Replaces an earlier set taken from a different broker's
+# tick export: the card displays Massive's bid/ask, so costing trades at another
+# venue's spread meant the displayed quote and the cost basis were different
+# instruments. Whichever is tighter is beside the point - they have to match.
+#
+# The new median is 2.75x the old one ($0.550 vs $0.20), which makes the cost
+# conclusion firmer rather than weaker: the largest measurable short-horizon
+# edge in this research was $0.088, now 6.3x under a single spread instead of
+# 2.3x.
+#
+# Worst session is the Asian open (18:00-02:00 ET) at a $0.715 median.
+SPREAD_MEDIAN = 0.550
+SPREAD_P90 = 0.750
+SPREAD_P99 = 0.840
+# Widest seen in that 24h sample. It is NOT a ceiling - no major release fell in
+# the window, and spreads gap far wider on NFP/CPI prints. Treat as "normal-day
+# worst", not "worst case".
+SPREAD_MAX = 1.140
+SPREAD_SOURCE = "Massive XAU/USD, 7,200 quotes across 24h, 2026-10-06"
 CONTRACT_OZ = 100.0
 
 # Hourly volatility profile, New York time, 8 years of H1.
@@ -148,7 +166,7 @@ BEST_M1_EDGE_USD = 0.088
 # ounce held in London vaults and redeemable, so it tracks spot closely. It
 # trades on Binance with a keyless public API.
 #
-# Calibration, 686 matched hourly bars vs MT5 XAUUSDm (2026-06-27 to 08-07):
+# Calibration, 686 matched hourly bars vs the broker tick export (2026-06-27 to 08-07):
 #     PAXG - spot : mean -$3.66, sd $2.19, corr of hourly changes 0.9951
 #     after subtracting the median offset below:
 #         mean |error| $1.74, p95 $4.33, max $6.82

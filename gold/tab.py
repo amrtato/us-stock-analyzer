@@ -412,8 +412,9 @@ def _live_block():
 
 def show_gold_tab() -> None:
     st.caption(
-        f"XAUUSD · {R.SOURCE} · {R.H1_BARS:,} hourly bars ({R.H1_YEARS:.0f}y) · "
-        f"{R.M1_BARS:,} minute bars ({R.M1_YEARS:.0f}y) · measured {R.MEASURED_AT}"
+        f"XAU/USD · live feed: Massive (spot, streaming bid/ask) · "
+        f"research basis: {R.H1_BARS:,} hourly bars ({R.H1_YEARS:.0f}y) + "
+        f"{R.M1_BARS:,} minute bars ({R.M1_YEARS:.0f}y), measured {R.MEASURED_AT}"
     )
 
     st.markdown(
@@ -490,14 +491,17 @@ def show_gold_tab() -> None:
     st.caption(
         # NB: raw f-strings. Streamlit parses $...$ as LaTeX math, so every literal
         # dollar sign in prose must reach markdown as \$ or the numbers get eaten.
-        rf"Broker-measured spread: median \${R.SPREAD_MEDIAN:.2f}, p90 \${R.SPREAD_P90:.2f}, "
-        rf"p99 \${R.SPREAD_P99:.3f}, max \${R.SPREAD_MAX:.2f} on news. This is the constraint "
-        rf"that ended the scalping research — gold's largest measurable short-horizon edge "
-        rf"was \${R.BEST_M1_EDGE_USD:.3f}, well under a single spread."
+        rf"Spread measured on this feed: median \${R.SPREAD_MEDIAN:.3f}, p90 "
+        rf"\${R.SPREAD_P90:.3f}, p99 \${R.SPREAD_P99:.3f}, widest \${R.SPREAD_MAX:.2f} in a "
+        rf"normal 24h ({R.SPREAD_SOURCE}) — no major release fell in that window, so "
+        rf"news prints go wider. This is the constraint that ended the scalping "
+        rf"research: gold's largest measurable short-horizon edge was "
+        rf"\${R.BEST_M1_EDGE_USD:.3f}, about {R.SPREAD_MEDIAN / R.BEST_M1_EDGE_USD:.0f}x under a single spread."
     )
     c1, c2 = st.columns([1, 2])
     with c1:
-        tgt = st.slider("Target size ($)", 0.5, 20.0, 4.0, 0.25, key="gold_tgt")
+        tgt = st.slider("Target size ($)", 0.5, 40.0, float(round(R.min_viable_target())),
+                        0.25, key="gold_tgt")
         share = R.SPREAD_MEDIAN / tgt * 100
         if share > 15:
             st.error(f"**{share:.1f}%** of this target goes to spread. You must be right far "
